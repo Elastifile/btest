@@ -5,7 +5,7 @@ SRCS:=btest.c ata.c sgio.c sg_read.c
 LIBS:=pthread rt aio
 CFLAGS+=-fms-extensions 
 
-commit=${shell echo `git rev-parse HEAD`:`git name-rev HEAD` | tr ' ' -}
+commit=${shell echo `git rev-parse --short HEAD`:`git name-rev HEAD` | tr ' ' -}
 OBJS=$(SRCS:%.c=%.o)
 _LIBS=${patsubst %,-l %, ${LIBS}}
 
