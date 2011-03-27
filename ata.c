@@ -2,9 +2,13 @@
 /*          - by Mark Lord (C) 1994-2008 -- freely distributable */
 /*	    - Shahar Frank (C) - 2010 */
 
-#define _BSD_SOURCE		/* for strtoll() */
+#ifndef __GLIBC_HAVE_LONG_LONG
+#define __GLIBC_HAVE_LONG_LONG
+#endif
+#ifndef __USE_MISC		/* for strtoll() */
+#define __USE_MISC		/* for strtoll() */
+#endif
 #include <unistd.h>
-#include <stdlib.h>
 #include <stdio.h>
 #define __USE_GNU		/* for O_DIRECT */
 #include <string.h>
@@ -33,6 +37,7 @@
 #include "btest.h"
 #include "hdparm.h"
 #include "sgio.h"
+#include "ata.h"
 
 #define MAX_SECTORS 1024
 #define THREAD_DATA_SZ 4096

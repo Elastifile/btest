@@ -3,7 +3,14 @@ TARGET:=btest
 HDRS=btest.h sgio.h hdparm.h
 SRCS:=btest.c ata.c sgio.c sg_read.c
 LIBS:=pthread rt aio
-CFLAGS+=-fms-extensions 
+ 
+EXT_IMP?=
+
+ifneq ($(EXT_IMP),)
+SRCS += btest_ext_$(EXT_IMP).c
+else
+SRCS += btest_ext_default.c
+endif
 
 commit=${shell echo `git rev-parse --short HEAD`:`git name-rev HEAD` | tr ' ' -}
 OBJS=$(SRCS:%.c=%.o)
@@ -12,7 +19,7 @@ _LIBS=${patsubst %,-l %, ${LIBS}}
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -g -O3 -D _LARGEFILE64_SOURCE -DCOMMIT="${commit}" -Wall -o $@ $(LDFLAGS) $^ ${_LIBS}
 
-$(OBJS): checkrpms
+$(OBJS): $(HDRS) | checkrpms
 
 checkrpms:
 	@if ! rpm -q libaio-devel > /dev/null 2>&1; then echo "libaio-devel is missing"; exit 1; fi

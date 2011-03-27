@@ -31,9 +31,51 @@
 #define _GNU_SOURCE
 #endif
 
+#include <stdlib.h>
+
 #ifdef	__cplusplus
 extern "C" {
 #endif
+
+typedef int8_t          int8;
+typedef uint8_t         uint8;
+typedef int16_t         int16;
+typedef uint16_t        uint16;
+typedef int32_t         int32;
+typedef uint32_t        uint32;
+typedef int64_t         int64;
+typedef uint64_t        uint64;
+
+/**
+ * Common configuration variables
+ */
+typedef struct BtestConf {
+        int secs;                       /** requested time limit in seconds */
+        int nthreads;                   /** requested number of threads */
+        int nfiles;                     /** given number of files */
+        int def_blocksize;
+        int diff_interval;
+        int subtotal_interval;
+        int rseed;
+        uint64 num_op_limit;            /**< requested op limit */
+        char *block_md_base;
+        int stampblock;                 /**< stamp block size, if it is -1 == "not set", the block size is used */
+        int aio_window_size;
+        
+        /* configuration flags */
+        int preformat;
+        int pretrim;
+        int sg_mode;
+        int write_behind;
+        int report_workers;
+        int activity_check;
+        int verify;
+        int verification_mode;
+        int ignore_errors;
+        int debug;
+} BtestConf;
+
+extern BtestConf conf;
 
 /** printf style debugging MACRO, conmmon header includes name of function */
 #undef WARN
@@ -45,38 +87,20 @@ extern "C" {
 #endif
 #define PANIC(fmt, args...)	panic(__FUNCTION__, fmt, ## args)
 
-#define DEBUG(fmt, args...)	if (debug) warn(__FUNCTION__, fmt, ## args)
-#define DEBUG2(fmt, args...)	if (debug > 1) warn(__FUNCTION__, fmt, ## args)
-#define DEBUG3(fmt, args...)	if (debug > 2) warn(__FUNCTION__, fmt, ## args)
+#define DEBUG(fmt, args...)	if (conf.debug) warn(__FUNCTION__, fmt, ## args)
+#define DEBUG2(fmt, args...)	if (conf.debug > 1) warn(__FUNCTION__, fmt, ## args)
+#define DEBUG3(fmt, args...)	if (conf.debug > 2) warn(__FUNCTION__, fmt, ## args)
 
 /* btest.c */
 void panic(const char *fn, char *msg, ...); 
 void warn(const char *fn, char *msg, ...);
 
-/* ata */
-
-struct sector_range_s {
-	uint64_t lba;
-	uint64_t nsectors;
-};
-
-#define SECTOR_RANGES_MAX	(16)
-//#define SECTOR_RANGES_MAX	(4096/sizeof (struct sector_range_s))
-int ata_init(char *devname);
-int ata_trim_sector_ranges(int fd, struct sector_range_s *ranges, int nranges);
-int ata_trim_sectors(int fd, uint64_t lba, uint64_t nsectors);
+void xdump(void const *p, int size, char *msg);
 
 extern char *prog;
-extern int debug;
 
-typedef int8_t          int8;
-typedef uint8_t         uint8;
-typedef int16_t         int16;
-typedef uint16_t        uint16;
-typedef int32_t         int32;
-typedef uint32_t        uint32;
-typedef int64_t         int64;
-typedef uint64_t        uint64;
+uint64 saferandom64(struct drand48_data * buffer);
+uint32 saferandom(struct drand48_data * buffer);
 
 #ifdef	__cplusplus
 }

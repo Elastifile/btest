@@ -22,7 +22,6 @@
 
 #include <linux/hdreg.h>
 
-extern int debug;
 int prefer_ata12 = 0;
 
 /*
@@ -226,7 +225,7 @@ int sg16(int fd, int rw, int dma, struct ata_tf *tf,
 	io_hdr.pack_id = tf_to_lba(tf);
 	io_hdr.timeout = (timeout_secs ? timeout_secs : 5) * 1000;	/* msecs */
 
-	if (debug > 3) {
+	if (conf.debug > 3) {
 		dump_bytes("outgoing cdb", cdb, sizeof(cdb));
 		if (data)
 			dump_bytes("data", data, 16);
@@ -249,16 +248,16 @@ int sg16(int fd, int rw, int dma, struct ata_tf *tf,
 
 	desc = sb + 8;
 	if (sb[0] != 0x72 || sb[7] < 14 || desc[0] != 0x09 || desc[1] < 0x0c) {
-		if (debug)
+		if (conf.debug)
 			dump_bytes("SG_IO: bad/missing sense data, sb[]", sb, sizeof(sb));
 		errno = EBADE;
 		return -1;
 	}
 
-	if (debug > 3)
+	if (conf.debug > 3)
 		dump_bytes("SG_IO: sb[]", sb, sizeof(sb));
 
-	if (debug > 3) {
+	if (conf.debug > 3) {
 		int len = desc[1], maxlen = sizeof(sb) - 8 - 2;
 		if (len > maxlen)
 			len = maxlen;
@@ -343,7 +342,7 @@ int do_drive_cmd(int fd, unsigned char *args)
 
       use_legacy_ioctl:
 #endif				/* SG_IO */
-	if (debug) {
+	if (conf.debug) {
 		if (args)
 			fprintf(stderr, "Trying legacy HDIO_DRIVE_CMD\n");
 	}
@@ -363,7 +362,7 @@ int do_taskfile_cmd(int fd, struct hdio_taskfile *r, unsigned int timeout_secs)
 	 */
 	tf_init(&tf, 0, 0, 0);
 #if 1				/* debugging */
-	if (debug) {
+	if (conf.debug) {
 		printf("oflags.lob_all=0x%02x, flags={", r->oflags.lob_all);
 		if (r->oflags.lob.feat)
 			printf(" feat");
@@ -420,7 +419,7 @@ int do_taskfile_cmd(int fd, struct hdio_taskfile *r, unsigned int timeout_secs)
 			tf.hob.lbam = r->hob.lbam;
 		if (r->oflags.hob.lbah)
 			tf.hob.lbah = r->hob.lbah;
-		if (debug)
+		if (conf.debug)
 			fprintf(stderr, "using LBA48 taskfile\n");
 	}
 	switch (r->cmd_req) {
@@ -474,12 +473,12 @@ int do_taskfile_cmd(int fd, struct hdio_taskfile *r, unsigned int timeout_secs)
 #else
 	timeout_secs = 0;	/* keep compiler happy */
 #endif				/* SG_IO */
-	if (debug)
+	if (conf.debug)
 		fprintf(stderr, "trying legacy HDIO_DRIVE_TASKFILE\n");
 	errno = 0;
 
 	rc = ioctl(fd, HDIO_DRIVE_TASKFILE, r);
-	if (debug) {
+	if (conf.debug) {
 		int err = errno;
 		fprintf(stderr, "rc=%d, errno=%d, returned ATA registers: ", rc, err);
 		if (r->iflags.lob.feat)
