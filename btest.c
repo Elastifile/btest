@@ -136,15 +136,17 @@
 #include "btest_data_struct.h"
 #include "sg_read.h"
 
-#define BTEST_VERSION 120
+#define BTEST_VERSION 121
 #define xstr(s) str(s)
 #define str(s) #s
 #define BTEST_COMMIT xstr(COMMIT)
 
 #define MAX_LINE_SIZE   256
 
+#define DEFAULT_TIME_LIMIT      60
+
 BtestConf conf = {
-        .secs = 60,                     /** default one minute test */
+        .secs = -1,                     /** default == DEFAULT_TIME_LIMIT one minute test */
         .nthreads = 1,                  /** default is single threaded test */
         .nfiles = 0,                    /** number of files is always set by command line */
         .def_blocksize = 4 * 1024,      /** default is 4k */
@@ -152,6 +154,7 @@ BtestConf conf = {
         .subtotal_interval = 0,         /** by default subtotal report interval is off */
         .rseed = 0,                     /** default rseed is set by main (time) */
         .num_op_limit = 0,              /** by default the test is not operation number limited */
+        .exit_eof = 0,                  /** exit on end of file? */
         .block_md_base = NULL,          /** by default no md file is used */
         .stampblock = -1,               /** by default stamp block is set to the block size */
         .aio_window_size = 0,           /** by default aio mode is not used (window == 0) */
@@ -1583,6 +1586,8 @@ void update_shared_stats(IOStats *stats)
         shared.lock_func();
         
         shared.finished++;
+        if (shared.finished >= shared.started)
+                finished = 1;
         shared.total.errors += stats->errors;
         shared.total.verify_errors += stats->verify_errors;
         shared.total.ops += stats->ops;
@@ -1643,34 +1648,6 @@ void flush()
 		stats->sduration =
 		    (t2.tv_sec - t1.tv_sec) * 1000000llu + (t2.tv_nsec - t1.tv_nsec) / 1000.0;
 		shared.total.sduration += stats->sduration;
-	}
-}
-
-/**
- * Force all verification md files to flush (msync).
- * 
- * @note this function may take a while if data range is large.
- * @todo: enable concurrent flush using several threads (one per file?)
- */
-static void md_flush()
-{
-	file_ctx *ctx, *e;
-
-	for (ctx = files, e = ctx + total_nfiles; ctx < e; ctx++) {
-                if (!ctx->shared.md_file)
-                        continue;
-
-                if (atomic_fetch_and_dec32(&ctx->shared.hdr->ref) != 1) {
-                        DEBUG("md file %s still refed. Not syncing", ctx->shared.md_file);
-                        continue;
-                }
-
-                printf("Please wait while flushing block md to %s\n", ctx->shared.md_file);
-                msync(ctx->shared.hdr, ctx->shared.hdr->md_start, MS_SYNC);
-                msync(ctx->shared.md, ctx->shared.hdr->mdsize, MS_SYNC);
-                printf("Done md flush to %s\n", ctx->shared.md_file);
-                close(ctx->shared.fd);
-                ctx->shared.md_file = NULL;
 	}
 }
 
@@ -2224,23 +2201,67 @@ static int64 calc_dedup_stamp_modulo(uint64 span, int dedup_likehood)
  **********************************************************************************************************************/
 
 /**
- * In validation mode (option -C): did we reached file's end? if not find next offset with meaningful md.
+ * In 'exit_eof' mode - check if we reached the end.
  */
-int validation_finished(worker_ctx *worker)
+int eof_reached(worker_ctx *worker)
+{
+        workload *wl = worker->wlctx->wl;
+
+        if (worker->offset == ~0ul || worker->offset + wl->blocksize > worker->wlctx->end) {
+                DEBUG("reached EOF (offset %lu)", worker->offset);
+                return 1;
+        }
+        return 0;
+}
+
+uint64 find_next_validation_offset(worker_ctx *worker)
 {
         file_ctx *fctx = worker->fctx;
         workload *wl = worker->wlctx->wl;
+        uint64 offset = worker->offset;
 
         for (;;) {
-                if (worker->offset + wl->blocksize > worker->wlctx->end) {
-                        finished = 1;
-                        return 1;
-                }
-                if (has_stamp(fctx, worker->offset))
+                if (offset + wl->blocksize > worker->wlctx->end)
+                        return ~0ul;
+
+                if (has_stamp(fctx, offset))
                         break;
-                worker->offset += wl->blocksize;
+
+                /* skip (block * threads) on this file to keep in sync with other threads */
+                offset += wl->blocksize * conf.nthreads;
+
         };
-       return 0;        /* validation not finished */
+       return offset;        /* validation not finished */
+}
+
+uint64 next_validation_offset(worker_ctx *worker)
+{
+        file_ctx *fctx = worker->fctx;
+        workload *wl = worker->wlctx->wl;
+        uint64 offset = worker->offset;
+
+        for (;;) {
+                /* skip (block * threads) on this file to keep in sync with other threads */
+                offset += wl->blocksize * conf.nthreads;
+
+                if (offset + wl->blocksize > worker->wlctx->end)
+                        return ~0ul;
+
+                if (has_stamp(fctx, offset))
+                        break;
+        };
+       return offset;        /* validation not finished */
+}
+
+/**
+ * Get next sequential offset for this worker
+ */
+uint64 seq_offset(worker_ctx *worker)
+{
+       /* wrap around */
+       if (worker->offset + worker->wlctx->wl->blocksize > worker->wlctx->end)
+		return worker->wlctx->start;
+       return worker->offset;
 }
 
 /**
@@ -2248,10 +2269,10 @@ int validation_finished(worker_ctx *worker)
  */
 uint64 next_seq_offset(worker_ctx *worker)
 {
-       /* wrap around */
-       if (worker->offset + worker->wlctx->wl->blocksize > worker->wlctx->end)
-		return worker->wlctx->start;
-       return worker->offset;
+        if (conf.verification_mode)
+                return next_validation_offset(worker);
+        else
+        	return worker->offset + worker->wlctx->wl->blocksize;
 }
 
 /**
@@ -2278,7 +2299,7 @@ int do_seq_read(worker_ctx *worker)
         workload *wl = worker->wlctx->wl;
         void *buf;
 
-	worker->offset = next_seq_offset(worker);
+	worker->offset = seq_offset(worker);
         buf = shared.prepare_buf(worker);
         
 	DEBUG3("file %s fd %d seek to offset %" PRIu64, fctx->file, fctx->fd, worker->offset);
@@ -2286,7 +2307,7 @@ int do_seq_read(worker_ctx *worker)
         
 	if (shared.read(worker, fctx->fd, buf, wl->blocksize, worker->offset) != wl->blocksize)
 		return -1;
-	worker->offset += wl->blocksize;        /* update offset for next (seq) operation */
+	worker->offset = next_seq_offset(worker);        /* update offset for next (seq) operation */
 
         XDUMP4(buf, wl->blocksize, "rand_read");
 
@@ -2299,7 +2320,7 @@ int do_seq_write(worker_ctx * worker)
         workload *wl = worker->wlctx->wl;
         void *buf;
 
-	worker->offset = next_seq_offset(worker);
+	worker->offset = seq_offset(worker);
         buf = shared.prepare_buf(worker);
 
         stampbuffer(worker, buf, wl->blocksize, worker->offset);
@@ -2309,7 +2330,7 @@ int do_seq_write(worker_ctx * worker)
 
 	if (shared.write(worker, fctx->fd, buf, wl->blocksize, worker->offset) != wl->blocksize)
 		return -1;
-	worker->offset += wl->blocksize;        /* update offset for next (seq) operation */
+	worker->offset = next_seq_offset(worker);        /* update offset for next (seq) operation */
         
 	return 0;
 }
@@ -2330,7 +2351,7 @@ int do_rand_read(worker_ctx * worker)
 		return -1;
         XDUMP4(buf, wl->blocksize, "rand_read");
 
-        worker->offset += wl->blocksize;        /* update offset for next (possibly seq) operation */
+	worker->offset = next_seq_offset(worker);        /* update offset for next (possibly seq) operation */
 
 	return 0;
 }
@@ -2351,7 +2372,7 @@ int do_rand_write(worker_ctx * worker)
 
         if (shared.write(worker, fctx->fd, buf, wl->blocksize, worker->offset) != wl->blocksize)
 		return -1;
-	worker->offset += wl->blocksize;        /* update offset for next (possibly seq) operation */
+	worker->offset = next_seq_offset(worker);        /* update offset for next (possibly seq) operation */
 
 	return 0;
 }
@@ -2381,15 +2402,12 @@ int do_io(worker_ctx *worker)
                 atomic_fetch_and_inc64(&total_ops);
         }
         
-        if (conf.verification_mode) {
-                if  (validation_finished(worker)) {
-                        finished = 1;
-                        return 1;
-                }
-                atomic_fetch_and_inc64(&total_ops);
-        }
-
+        if (conf.exit_eof && eof_reached(worker))
+                return 1;
         
+        if (conf.verification_mode)
+                atomic_fetch_and_inc64(&total_ops);
+
 	if (wl->readratio == 100)
 		doread = 1;
 	else if (wl->readratio == 0)
@@ -2398,13 +2416,15 @@ int do_io(worker_ctx *worker)
 		doread = (saferandom(&worker->rbuf) % 100) < wl->readratio;
 
 	if (wl->randomratio == 100)
-		dorandom = 1 << 1;
+		dorandom = 1;
 	else if (wl->randomratio == 0)
-		dorandom = 0 << 1;
+		dorandom = 0;
 	else 
 		dorandom = (saferandom(&worker->rbuf) % 100) < wl->randomratio;
+        
+        DEBUG3("read ratio %d - %d random ratio %d - %d", wl->readratio, doread, wl->randomratio, dorandom);
 
-	switch (doread | dorandom) {
+	switch (doread | (dorandom << 1)) {
 	case 0:
 		DEBUG3("%s %d: seq write: block size %d", fctx->file, worker->tid, wl->blocksize);
 		io = do_seq_write;
@@ -2441,16 +2461,18 @@ int do_io(worker_ctx *worker)
 static void init_shared_file_ctx(file_ctx *fctx)
 {
         shared_file_ctx *shared = &fctx->shared;
-        char md_file[512];
+        char md_file[512] = "";
         char *devname, *s;
 
         if (!conf.verify || !use_stamps)
                 return;
 
-        DEBUG("verification requested - for filename %s base %s", fctx->file, conf.block_md_base);
+        DEBUG2("verification requested - for filename %s base %s", fctx->file, conf.block_md_base);
         if (!conf.block_md_base)
                 sprintf(md_file, "/dev/zero");
-        else {
+        else if (conf.nfiles == 1) {
+                strncpy(md_file, conf.block_md_base, sizeof md_file -1 );
+        } else {
 
                 devname = strdupa(fctx->file);
 
@@ -2463,7 +2485,7 @@ static void init_shared_file_ctx(file_ctx *fctx)
         }
 
         shared->md_file = strdup(md_file);
-        printf("open/create md file %s\n", md_file);
+        DEBUG2("open/create md file %s\n", md_file);
         if ((shared->fd = open(shared->md_file, O_RDWR | O_CREAT, 0744)) < 0)
                 PANIC("can't open md file '%s'", shared->md_file);
 }
@@ -2473,6 +2495,7 @@ static void init_shared_file_ctx(file_ctx *fctx)
  */
 static void init_md_hdr(file_ctx *ctx, md_file_hdr *hdr, size_t hdrsize, size_t mdsize)
 {
+        printf("Initializing new md file %s for device %s\n", ctx->shared.md_file, ctx->file);
         hdr->stampblock = conf.stampblock;
         strncpy(hdr->devname, ctx->file, sizeof hdr->devname - 1);
         hdr->max_mds = sizeof hdr->workers_map / sizeof (uint);
@@ -2520,7 +2543,7 @@ static int init_validation_md(file_ctx *fctx, uint64 start, uint64 end)
         size_t size, hdrsize;
         int initializer = 0;
         ulong blocks;
-        int flags;
+        int flags, ref;
 
         if (!conf.verify || conf.stampblock <= 0 || !use_stamps)
                 return 1;         /* no verification is enabled, or no stamps, so I am always "initializer" */
@@ -2544,19 +2567,26 @@ static int init_validation_md(file_ctx *fctx, uint64 start, uint64 end)
                 if ((file_shared->hdr = mmap(NULL, hdrsize, PROT_WRITE | PROT_READ, flags, file_shared->fd, 0)) == (void *)-1)
                         PANIC("mmap failed: '%s' arg md calloc: size %lu", file_shared->md_file, hdrsize);
                 
-                if (!atomic_fetch_and_inc32(&file_shared->hdr->ref) && !file_shared->hdr->initialized) {
+                if (!(ref = atomic_fetch_and_inc32(&file_shared->hdr->ref)) && !file_shared->hdr->initialized) {
                         /* non initialized file and first to ref it */
                         initializer = 1;
                         init_md_hdr(fctx, file_shared->hdr, hdrsize, size);
                 } else {
                         /* We may be non first thread to join a not yet initialized file... */
                         while (!file_shared->hdr->initialized) {
+                                if (file_shared->hdr->ref < 2)
+                                        PANIC("I am not initializer but there is no one except me?!");
                                 printf("wait until md %s will be initialized...", file_shared->md_file);
                                 th_busywait();
                         }
                         
                         /* Check that our critical verification parameters match the file parameters */
-                        printf("join to already reffed md file %s\n", file_shared->md_file);
+                        if (ref)
+                                printf("Joining to already reffed md file %s for device %s\n",
+                                        file_shared->md_file, fctx->file);
+                        else
+                                printf("Opening md file %s for device %s\n", file_shared->md_file, fctx->file);
+                                
                         if (file_shared->hdr->version/100 != MD_VERSION/100)     /* only major version matters */
                                 PANIC("md version mismatch (md file %d mine is %d)",
                                         file_shared->hdr->version, MD_VERSION);
@@ -2587,6 +2617,35 @@ static int init_validation_md(file_ctx *fctx, uint64 start, uint64 end)
         
         return initializer;
 }
+
+/**
+ * Force all verification md files to flush (msync).
+ * 
+ * @note this function may take a while if data range is large.
+ * @todo: enable concurrent flush using several threads (one per file?)
+ */
+static void md_flush()
+{
+	file_ctx *ctx, *e;
+
+	for (ctx = files, e = ctx + total_nfiles; ctx < e; ctx++) {
+                if (!ctx->shared.md_file)
+                        continue;
+
+                if (atomic_fetch_and_dec32(&ctx->shared.hdr->ref) != 1) {
+                        DEBUG("md file %s still refed. Not syncing", ctx->shared.md_file);
+                        continue;
+                }
+
+                printf("Please wait while flushing block md to %s\n", ctx->shared.md_file);
+                msync(ctx->shared.hdr, ctx->shared.hdr->md_start, MS_SYNC);
+                msync(ctx->shared.md, ctx->shared.hdr->mdsize, MS_SYNC);
+                printf("Done md flush to %s\n", ctx->shared.md_file);
+                close(ctx->shared.fd);
+                ctx->shared.md_file = NULL;
+	}
+}
+
 
 /**********************************************************************************************************************
  * Sync + Async IO init 
@@ -2770,7 +2829,7 @@ int io_ended(worker_ctx *worker, int ioret, int update_stats)
                 stats->errors++;
                 return 1;       /* ended with errors */
         }
-        if (ioret == 1)
+        if (ioret == 1 || worker->offset == ~0ul)
                 return -1; /* end of test reached */
         if (!update_stats)
                 return 0;       /* OK */
@@ -2836,7 +2895,8 @@ void thread_init_file(file_ctx *ctx)
                 if (size < startoffset + maxblocksize)
                         size = startoffset + maxblocksize;
                 if ((ctx->size = getsize(ctx->type == F_SG, ctx->fd, size, 0)) < size)
-                        PANIC("After format: can't get size of '%s' sz %"PRId64", or size < end offset %"PRId64,
+                        PANIC("can't get size of '%s' sz %"PRId64", or size < end offset %"PRId64 " - did "
+                                "you format the file (try -F)?",
                                 ctx->file, ctx->size, size);
         }
         /* now that all sizes are known, build the workload ctx for this file */
@@ -2867,6 +2927,7 @@ worker_ctx *new_worker(file_ctx *fctx)
         srand48_r(conf.rseed + worker->num * 10000, &worker->rbuf);
 
         worker->tid = gettid();
+        worker->offset = startoffset;
 
         return worker;
 }
@@ -3018,10 +3079,8 @@ void *aio_thread(aio_thread_ctx *athread)
                                 completed_iocb->u.c.offset,
                                 event->res2, event->res);*/
 
-                        io_ended(worker, r, 1);
-
-                        if (finished)
-                                continue;
+                        if (io_ended(worker, r, 1) < 0 || finished)
+                                continue;       /* of end of the keep looping to close the window */
 
                         /* send another io */
                         worker->wlctx = next_workload_ctx(worker);
@@ -3095,6 +3154,17 @@ void* sync_thread(io_thread_ctx *io_thread)
 	shared.cond_wait_func(); 
         shared.unlock_func(); 
 
+        /*
+         * In verification mode, make thread # on this file to start from # block. 
+         * Note that we use the fact that there is only one workload.
+         */
+        if (conf.verification_mode) {
+                worker->wlctx = next_workload_ctx(worker);
+                worker->offset = workloads[0].blocksize * (io_thread->num % conf.nthreads);
+                worker->offset = find_next_validation_offset(worker);
+                DEBUG("io thread %d file %s set offset to %lu", io_thread->num, worker->fctx->file, worker->offset);
+        }
+        
 	DEBUG("%d: worker on thread ['%s']: Start", worker->tid, worker->fctx->file);
 
         while (!finished) {
@@ -3106,6 +3176,8 @@ void* sync_thread(io_thread_ctx *io_thread)
                         break;
         }
 
+        DEBUG("worker done");
+        
         stats->lat = comp_lat(stats);
 
         worker_summary(worker, 0);
@@ -3126,6 +3198,7 @@ static struct option btest_long_options[] = {
         {"alignment_size", 1, 0, 'a'},
         {"duration", 1, 0, 't'},
         {"num_ops", 1, 0, 'n'},
+        {"exit_eof", 0, 0, 'e'},
         {"threads", 1, 0, 'T'},
         {"offset", 1, 0, 'o'},
         {"length", 1, 0, 'l'},
@@ -3169,36 +3242,45 @@ void usage(void)
 	printf("\nWorkload file mode:\n       %s [-hdV -W -D -f <workloads filename> -t <sec> "
              "-T <threads> -S <seed> -w <window-size> -m <md_file_base> -v -c "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <dev/file> ...\n", prog);
-	printf("\nVerification mode:\n       %s [-hdV -D -C <md_base> -b <blksz> -a <alignsize> -o <start> -l <length> -S <seed> "
+	printf("\nVerification mode:\n       %s [-hdV -D -C <md_base> -b <blksz> -a <alignsize> "
+                "-o <start> -l <length> -S <seed> "
                 "-p <dedup_ratio> -P <stampsz> -O -v -r <sec> -R <sec>] <dev/file> ...\n", prog);
         printf("\n\tOperation Modes:\n");
         printf("\t\t: Sync/Async - If -w/--write_behind is specified async is enabled, if not sync is used.\n");
         printf("\t\t: SCSI Genetic mode - used if device starts with /dev/sg.\n");
         printf("\t\t: Verification mode: -C/--check_scan  - sequentially scan the file and verify its data stamps "
-                "according to specified md file. The default behavior is to stop on first error. This can be changed using "
+                "according to specified md file. The default behavior is to stop on first error. "
+                "This can be changed using "
                 "the -v option. See also -m (--block_md) and -v (--verify)/-c (--check) options."
                 "This mode is read only and most flags are irrelevant for it.\n");
         printf("\n\tMain options:\n");
-        printf("\t\t-f/--workload_file <filename> - Accept multiple workloads per thread from file See 'Mutiple Workloads From File' below. \n");
+        printf("\t\t-f/--workload_file <filename> - Accept multiple workloads per thread from file See "
+                "'Mutiple Workloads From File' below. \n");
 	printf("\t\t Size options support prefixes b (block) K (KB) M (MB) G (GB) T (TB), all in 2 base\n");
 	printf("\t\t-b/--block_size <IO Block size> [%d]\n", conf.def_blocksize);
 	printf("\t\t-a/--alignment_size <IO alignment size> [by default same as block size]\n");
-	printf("\t\t-t/--duration <sec> - limit test duration in seconds, 0 for inifinity [%d]\n", conf.secs);
-	printf("\t\t-n/--num_ops <ops number>  - limit the test's total number of IO operrations 0 for inifinity [%d]\n", conf.secs);
+	printf("\t\t-t/--duration <sec> - limit test duration in seconds, 0 for infinity [%d]\n", conf.secs);
+	printf("\t\t-n/--num_ops <ops number>  - limit the test's total number of IO operations 0 for infinity "
+                "[%d]\n", DEFAULT_TIME_LIMIT);
+	printf("\t\t-e/--exit_eof  - exit on EOF (make sense for sequential IO) [%d]\n", conf.exit_eof);
 	printf("\t\t-T/--threads <For sync IO: number of threads per file. For AsyncIO: total number of "
                 "working threads> [%d]\n", conf.nthreads);
 	printf("\t\t-o/--offset <start offset> [0]\n");
 	printf("\t\t-l/--length <size of area in file/device to use for IO> [full]\n");
 	printf("\t\t-S/--seed <random seed>  [current time]\n");
-        printf("\t\t-w/--async_io <window size> - AsyncIO set window size in blocks per file per worker thread. The total number of "
+        printf("\t\t-w/--async_io <window size> - AsyncIO set window size in blocks per file per "
+                "worker thread. The total number of "
                 "inflight IOs is #threads*#files*window_size. > [0]\n");
         printf("\t\t-P/--stampblock <size > - size of block to use when stamping writes. "
                 "Stamp is the dedup/write stamp (see -p) and/or offset stamp (see -O). Size 0 disables data stamping"
                 " [the default size is smallest of block size or 4k (see -b)]\n");
         printf("\t\t-p/--dedup <expected dedup percent> control the expected dedup rate (in percent). "
-                "E.g. 120 is %%120 dedup factor or 1.2. -1 to disable the dedup stamp patterns, 0 for no dedup.> [0 == no dedup]\n");
+                "E.g. 120 is %%120 dedup factor or 1.2. -1 to disable the dedup stamp patterns, "
+                "0 for no dedup.> [0 == no dedup]\n");
         printf("\t\t-O/--offset_stamp  - use offset stamp, one per stamp block [No]\n");
-        printf("\t\t-m/--block_md <base-filename>  - use specified string + dev name as file to load/save verification md. Used by -v/-y options [%s]\n", conf.block_md_base);
+        printf("\t\t-m/--block_md <base-filename>  - use specified string + dev name as file to load/save"
+                "verification md. If only a single file is given, the base will be used as the md file name."
+                "Used by -v/-y options [%s]\n", conf.block_md_base);
         printf("\t\t-v/--verify  - verify stamps after each read (see options -p, -P and -O [False]\n");
         printf("\t\t-c/--check  - like verify, but stop on verification errors [False]\n");
         printf("\t\t-i/--ignore_errors  - do not stop on errors, just count them [False]\n");
@@ -3210,14 +3292,18 @@ void usage(void)
 	printf("\tReal Time Reports:\n");
 	printf("\t\tsignal SIGUSR1 prints reports until now\n");
 	printf("\t\tsignal SIGUSR2 prints reports from last report\n");
-	printf("\t\t-r/--diff_report_interval <seconds> - report of activitly from last report [%d], set to 0 to disable\n", conf.diff_interval);
-	printf("\t\t-R/--subtotal_report_internal <seconds> - report activity from test start [%d], set to 0 to disable\n", conf.subtotal_interval);
+	printf("\t\t-r/--diff_report_interval <seconds> - report of activitly from last report [%d], "
+                "set to 0 to disable\n", conf.diff_interval);
+	printf("\t\t-R/--subtotal_report_internal <seconds> - report activity from test start [%d], "
+                "set to 0 to disable\n", conf.subtotal_interval);
 	printf("\t\t-z/--report_workers  - report stats for each worker [%d] (note: using this flag for"
-                "very large amount of threads/workers may affect the test and make the measurements inaccurate)\n", conf.report_workers);
+                "very large amount of threads/workers may affect the test and make the "
+                "measurements inaccurate)\n", conf.report_workers);
 	printf("\tFormat/Trim options:\n");
 	printf("\t\t-F/--format : preformat test area (using writes)\n");
 	printf("\t\t-X/--trim : Pre-Trim test area (SSD)\n");
-	printf("\t\t-x/--trim_replace <trim block size> : After each write, trim blocks of \"trim block size\" at random \n"
+	printf("\t\t-x/--trim_replace <trim block size> : After each write, trim blocks of "
+                "\"trim block size\" at random \n"
 		"\t\t\tlocations such that write block size data is trimmed\n");
 	printf("\tSG support:\n");
 	printf("\t\ttarget files that are formated as /dev/sgX are accessed using raw generic scsi calls\n");
@@ -3227,11 +3313,13 @@ void usage(void)
 	printf("\t\t-d/--debug : increase the debugging level\n");
 	printf("\t\t-L/--debuglines <lines>  - set debug lines (binary trace lines). 0 to disable [%u]\n", ndebuglines);
         printf("\n\tMutiple Workloads From File:\n");
-        printf("\t\tIf -f option for workloads configuration from file is set, the following parameters must not be \n");
+        printf("\t\tIf -f option for workloads configuration from file is set, the "
+                "following parameters must not be \n");
         printf("\t\tconfigured in the commands line: -b -p -P -a -o -l <S|R|rand-ratio> <R|W|read-ratio>\n");
         printf("\t\tIn the configuration file, each line represents a workload. \n");
         printf("\t\tEach line begins with a weight of this workload, must be a number betwee 1 and 100. \n");
-        printf("\t\tThe weight is followed by -b <blksz> -p <dedup_likehood> -P <stamp_block> -a <align_size> -o <start> -l <length> "
+        printf("\t\tThe weight is followed by -b <blksz> -p <dedup_likehood> -P "
+                "<stamp_block> -a <align_size> -o <start> -l <length> "
                 "<S|R|rand-ratio> <R|W|read-ratio> \n");
         printf("\t\tMaximal number of workloads is %d.\n", MAX_WORKLOADS);
         printf("\t\tExample of a configuration file content:\n");
@@ -3343,14 +3431,14 @@ void *sync_main(void * unused)
         
 	for (i = 0; i < conf.nfiles; i++) {
                 file_ctx *fctx = new_file_ctx();
-                io_thread_ctx *io_thread = io_ctx + i;
-                
-                io_thread->fctx = fctx;
-                io_thread->num = i;
 
                 /* init sync worker threads (threads per file), io_thread_ctx is per file */
                 for (t = 0; t < conf.nthreads; t++) {
+                        io_thread_ctx *io_thread = io_ctx + total_nthreads;
                         pthread_t thid = 0;
+
+                        io_thread->fctx = fctx;
+                        io_thread->num = total_nthreads;
 
                         if (total_nthreads >= max_nthreads)
                                 PANIC("Thread limit %d now %d has been reached!", max_nthreads, total_nthreads);
@@ -3459,16 +3547,19 @@ static void parse_dorandom(workload *wl, char* optarg)
         case 'R':
         case 'r':
                 wl->randomratio = 100;
+                printf("Use pure random IO\n");
                 break;
         case 'S':
         case 's':
                 wl->randomratio = 0;
+                printf("Use pure sequential IO\n");
                 break;
         default:
                 wl->randomratio = atoi(optarg);
 
                 if (wl->randomratio < 0 || wl->randomratio > 100)
                         PANIC("bad random/sequential parameter: should be R|S|0-100");
+                printf("Use %d%% random IO\n", wl->randomratio);
 
         }
 }
@@ -3482,15 +3573,18 @@ static void parse_doread(workload *wl, char* optarg)
         case 'R':
         case 'r':
                 wl->readratio = 100;
+                printf("Generate only reads\n");
                 break;
         case 'W':
         case 'w':
                 wl->readratio = 0;
+                printf("Generate only writes\n");
                 break;
         default:
                 wl->readratio = atoi(optarg);
                 if (wl->readratio < 0 || wl->readratio > 100)
                         PANIC("bad read/write parameter: should be R|W|0-100");
+                printf("Generate %d%% reads, the rest will be writes\n", wl->readratio);
         }
 }
 
@@ -3545,6 +3639,7 @@ void init_workloads(void)
         if (total_nworkloads >= MAX_WORKLOADS)
                 PANIC("number limit of workloads is reached %d", MAX_WORKLOADS);
         
+        DEBUG("total workloads %d", total_nworkloads);
         /* compute max data range, check for writers */
         for (w = 0; w < total_nworkloads; w++) {
                 workload *wl = workloads + w;
@@ -3575,6 +3670,7 @@ void init_workloads(void)
         readonly = rdonly;
         maxblocksize = maxbsz;
         minblocksize = minbsz;
+        DEBUG("startoffset %lu readonly %d block size (%d-%d)", startoffset, readonly, minblocksize, maxblocksize);
         
         /* if stamp block is not set by now, use the min block size */
         if (conf.stampblock == -1) {
@@ -3725,7 +3821,7 @@ int main(int argc, char **argv)
 
         optind = 0;
         /* allow extensions to add options */
-        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:zi",
+        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:zie",
                                    btest_long_options, &unified_long_options);
 
 	while ((opt = getopt_long(argc, argv, optstr, unified_long_options, NULL)) != -1) {
@@ -3806,11 +3902,19 @@ int main(int argc, char **argv)
                 case 'n':
                         check_mode("ops limit (-n)", -1, 0);
                         conf.num_op_limit = strtol(optarg, 0, 0);
-                        if (!conf.secs)      /* if time limit is not specified - use infinity */
+                        if (conf.secs < 0)      /* if time limit is not specified - use infinity */
                                 conf.secs = 2000000;
+                        printf("Test is limited to %lu IO operations\n", conf.num_op_limit);
 			break;
+                case 'e':
+                        check_mode("exit on eof (-e)", -1, 0);
+                        conf.exit_eof = 1;
+                        if (conf.secs < 0)      /* if time limit is not specified - use infinity */
+                                conf.secs = 2000000;                        
+                        printf("Test will exit on EOF\n");
+                        break;
 		case 'T':
-                        check_mode("threads number (-T)", -1, 0);
+                        check_mode("threads number (-T)", -1, 1);
 			conf.nthreads = atoi(optarg);
 			if (!conf.nthreads)
 				PANIC("invalid threads parameter: -T %s", optarg);
@@ -3875,7 +3979,7 @@ int main(int argc, char **argv)
                         conf.block_md_base = optarg;
                         if (!conf.verify)
                                 conf.verify = 1;
-                        printf("block md file base: '%s'\n", conf.block_md_base);
+                        printf("Verification md file base: '%s'\n", conf.block_md_base);
                         break;
                 case 'v':
                         conf.verify = 1;
@@ -3904,18 +4008,23 @@ int main(int argc, char **argv)
 		}
 	}
 
+        if (conf.secs < 0) {
+                printf("Using the default %d seconds time limit\n", DEFAULT_TIME_LIMIT);
+                conf.secs = DEFAULT_TIME_LIMIT;
+        }
+        
         init_debug_lines();
         
         if (conf.verification_mode) {
                 conf.preformat = 0;
                 conf.pretrim = 0;
+                conf.exit_eof = 1;
                 wl->trimsize = 0;
                 wl->randomratio = 0;
                 wl->readratio = 100;
                 model = IO_MODEL_SYNC;
                 conf.subtotal_interval = 0;
                 total_nworkloads = 1;
-                conf.nthreads = 1;
 
                 verify_sizes(wl);
                 

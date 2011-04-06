@@ -58,6 +58,7 @@ typedef struct BtestConf {
         int subtotal_interval;
         int rseed;
         uint64 num_op_limit;            /**< requested op limit */
+        int exit_eof;
         char *block_md_base;
         int stampblock;                 /**< stamp block size, if it is -1 == "not set", the block size is used */
         int aio_window_size;
