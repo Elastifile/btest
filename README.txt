@@ -1,3 +1,6 @@
+110525 - Version 121-1:
+-fix async summary report bug (duration should be =/ ndev)
+
 110406 - Version 121:
 - Add exit on end of file option
 - Multi threaded validation mode support (-T nthread with -C)
