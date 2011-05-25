@@ -184,13 +184,14 @@ worker_ctx      *workers;
 aio_thread_ctx  *aio_ctx;
 io_thread_ctx   *io_ctx;
 
-int total_nworkers;                           /**< total number of workers */
-int total_nthreads;                           /**< total number of threads */
-int total_nfiles;                             /**< total number of files/devs */
-int total_nworkloads;                         /**< total number of defined workloads */
-int max_nworkers;                           /**< max number of workers */
-int max_nthreads;                           /**< max number of threads */
-int max_nfiles;                             /**< max number of files/devs */
+int total_nworkers;                             /**< total number of workers */
+int total_nthreads;                             /**< total number of threads */
+int total_nfiles;                               /**< total number of files/devs */
+int total_nworkloads;                           /**< total number of defined workloads */
+int max_nworkers;                               /**< max number of workers */
+int max_nthreads;                               /**< max number of threads */
+int max_nfiles;                                 /**< max number of files/devs */
+int devs_per_thread;                           /**< number of devices per thread */
 
 unsigned char workload_weights[MAX_WORKLOADS * 100];
 int total_workload_weights = 0;
@@ -1665,8 +1666,8 @@ int finish(int n)
 	}
 	shared.unlock_func();
 
-	shared.total.duration /= n;
-	shared.total.lat /= n;
+	shared.total.duration /= n * devs_per_thread;
+	shared.total.lat /= n * devs_per_thread;
 	return 0;
 }
 
@@ -4087,6 +4088,7 @@ int main(int argc, char **argv)
                 /* nthreads per file, one worker per IO thread */
                 max_nthreads = conf.nfiles * conf.nthreads;
                 max_nworkers = max_nthreads;
+                devs_per_thread = 1;
                 
                 if (!(workers = calloc(max_nworkers, sizeof *workers)))
                         PANIC("can't alloc %d workers", max_nworkers);
@@ -4121,6 +4123,7 @@ int main(int argc, char **argv)
                 /* aio threads == nthreads, for each thread there are conf.aio_window_size * files * workloads workers */
                 max_nthreads = conf.nthreads;
                 max_nworkers = max_nthreads * (conf.aio_window_size * total_nworkloads * conf.nfiles);
+                devs_per_thread = conf.nfiles;
                 
                 if (!(workers = calloc(max_nworkers, sizeof *workers)))
                         PANIC("can't alloc %d workers", max_nworkers);
