@@ -220,6 +220,8 @@ int openflags_block = O_CREAT | O_LARGEFILE | O_NOATIME | O_SYNC;
 #define TRIM_FORMAT_IOSZ (10 << 20)
 char formatbuf[FORMAT_IOSZ];
 
+#define DEDUP_STAMP_SIZE (2 * sizeof (uint64))
+
 /**
  * Global variables for Async IO only
  */
@@ -919,26 +921,33 @@ block_worker_md *alloc_block_worker_md(worker_ctx *worker, uint64 stamp, uint64 
 ***********************************************************************************************************************/
 
 /**
- * Generate a 64 bit stamp to control data dedup. The modulo is computed such that in the infinity (or just after enough
+ * Generate a 64 bit stamp to control data dedup.
+ * 
+ * @param rand_buff  - drand48 buffer to use to generate random base
+ * @param space_size - size of symbols space
+ * 
+ * The stamp is computed such that in the infinity (or just after enough
  * writes) we should reach the requested dedup factor.
+ * 
+ * space_size is used as modulu on the base random 64 bit.
  *
- * A zero modulo means we don't wont dedup at all, and in such case we try to create a unique stamp using random
+ * A zero space size means we don't wont dedup at all, and in such case we try to create a unique stamp using random
  * numbers - so we do not guarantee that it will be unique, but in practice it will be unique short of very few
  * cases.
  *
  * This stamp is also used for verification (see the header notes).
  */
-uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 modulu)
+uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size)
 {
         uint64 stamp;
 
         stamp = saferandom64(rand_buff);
         /* module == 0 means no dedup - keep stamp as it is */
-        if (modulu > 0)
-                stamp = stamp % modulu;
+        if (space_size > 0)
+                stamp = (stamp % space_size) + 1; /* +1 to reserve 0 as special case */
 
         /* reserve 0 as a special - do not check stamp */
-        if (stamp != ~0lu)
+        if (stamp == 0)
                 stamp++;
 
         DEBUG3("dedup stamp 0x%lx", stamp);
@@ -998,9 +1007,10 @@ int stamp_block(worker_ctx *worker, char *buf, int len, uint64 offset, int write
 
         ADD_DEBUG_LINE('S', worker->tid, owner);   /* stamp */
 
-        *(uint64 *)buf = BLOCK_STAMP(stamp);
+        ((uint64 *)buf)[0] = BLOCK_STAMP(stamp);
+        ((uint64 *)buf)[1] = fctx->num;         /* ensure each device gets its own symbol space */
 
-        return sizeof(uint64);
+        return DEDUP_STAMP_SIZE;
 }
 
 /**
@@ -1085,7 +1095,7 @@ int check_stamp(worker_ctx *worker, char *buf, int len, uint64 offset)
 
         if (!worker->fctx->shared.md)                           /* no md */
                 return 0;
-        if (len < sizeof(uint64))         /* no stamp or no space - can't check */
+        if (len < DEDUP_STAMP_SIZE)         /* no stamp or no space - can't check */
                 return 0;
 
         owner = get_block_worker(worker, md);
@@ -1111,7 +1121,7 @@ int check_stamp(worker_ctx *worker, char *buf, int len, uint64 offset)
         if (old == 0)   /* new block, nothing to check */
                 return -1;
         
-        return sizeof(uint64);
+        return DEDUP_STAMP_SIZE;
 }
 
 /**
@@ -3275,7 +3285,7 @@ void usage(void)
         printf("\t\t-P/--stampblock <size > - size of block to use when stamping writes. "
                 "Stamp is the dedup/write stamp (see -p) and/or offset stamp (see -O). Size 0 disables data stamping"
                 " [the default size is smallest of block size or 4k (see -b)]\n");
-        printf("\t\t-p/--dedup <expected dedup percent> control the expected dedup rate (in percent). "
+        printf("\t\t-p/--dedup <expected dedup percent> control the expected dedup rate (in percent) per device. "
                 "E.g. 120 is %%120 dedup factor or 1.2. -1 to disable the dedup stamp patterns, "
                 "0 for no dedup.> [0 == no dedup]\n");
         printf("\t\t-O/--offset_stamp  - use offset stamp, one per stamp block [No]\n");
