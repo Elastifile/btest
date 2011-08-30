@@ -117,6 +117,7 @@ struct block_worker_md {
 
 #define MD_MAX_WORKERS  255     /**< MAX workers acting on a signle md */
 #define MD_MAX_BLOCK_SIZE  (1 << 20)
+#define MD_MAX_MD_MAPS     (MD_MAX_WORKERS*(MD_MAX_BLOCK_SIZE/512)*2)
 #define MD_VERSION         100          /* major 1, minor 0 - btest binary major must >= file md */
 
 typedef struct md_file_hdr {
@@ -129,8 +130,8 @@ typedef struct md_file_hdr {
         size_t mdsize;
         uint32 ref;
         uint max_mds;
-        uint workers_map[MD_MAX_WORKERS*(MD_MAX_BLOCK_SIZE/512)*2];
-        block_worker_md workers_mds[MD_MAX_WORKERS*(MD_MAX_BLOCK_SIZE/512)*2];
+        uint workers_map[MD_MAX_MD_MAPS];
+        block_worker_md workers_mds[MD_MAX_MD_MAPS];
 } md_file_hdr;
 
 struct workload_ctx {
@@ -221,6 +222,8 @@ struct file_ctx {
 
         workload_ctx wlctxs[MAX_WORKLOADS];     /* all workload contexts for this file */
         shared_file_ctx shared;
+        
+        uint64 seq_offset;          /**< for seq workloads - shared among workloads */
 };
 
 typedef enum IOModel {

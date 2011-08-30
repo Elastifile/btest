@@ -136,7 +136,7 @@
 #include "btest_data_struct.h"
 #include "sg_read.h"
 
-#define BTEST_VERSION 121
+#define BTEST_VERSION 130
 #define xstr(s) str(s)
 #define str(s) #s
 #define BTEST_COMMIT xstr(COMMIT)
@@ -297,6 +297,24 @@ inline uint64 atomic_fetch_and_inc64(volatile uint64 *ref)
 {
         /* attomically incref and return previous value */
         return __sync_fetch_and_add(ref, (uint64)1);
+}
+
+/**
+ * atomically increment 'ref' by one and return previous value
+ */
+inline uint64 atomic_add64_and_fetch(volatile uint64 *ref, uint64 value)
+{
+        /* attomically incref and return previous value */
+        return __sync_add_and_fetch(ref, value);
+}
+
+/**
+ * atomically increment 'ref' by one and return previous value
+ */
+inline uint64 atomic_fetch_and_add64(volatile uint64 *ref, uint64 value)
+{
+        /* attomically incref and return previous value */
+        return __sync_fetch_and_add(ref, value);
 }
 
 /**
@@ -879,15 +897,16 @@ block_worker_md *alloc_block_worker_md(worker_ctx *worker, uint64 stamp, uint64 
         block_worker_md *wmd = worker->worker_md;
         md_file_hdr *hdr = worker->fctx->shared.hdr;
         uint tid = worker->tid;
+        int retry = 0;
 
         DEBUG3("cached wmd %p", wmd);
-        while (!wmd) {
+        for (retry = 0; !wmd && retry < 5; retry++) {
                 int e, i;
                 uint *map = hdr->workers_map;
 
                 for (i = 0, e = hdr->max_mds; i < e; i++) {
                         int id;
-                        id = (47 * tid * alloc_block_spinning) % hdr->max_mds;
+                        id = (alloc_block_spinning + tid * 6991) % hdr->max_mds;
                         atomic_fetch_and_inc64(&alloc_block_spinning);
                         
                         if (map[id])
@@ -900,9 +919,13 @@ block_worker_md *alloc_block_worker_md(worker_ctx *worker, uint64 stamp, uint64 
                                 break;
                         }
                 }
-                
         }
 
+        if (!wmd)
+                PANIC("couldn't alloc worker md (max mds %d) "
+                        "-- Please reduce number of threads/workers or lower"
+                        "the max bloc size/stamp block ratio", hdr->max_mds);
+                
         DEBUG3("alloced %p id %d", wmd, wmd->id);
         wmd->verref = BLOCK_MD_VERREF(saferandom64(&worker->rbuf), 1); /* new version, set ref to 1 */
         wmd->old = 0;         /* will be set again in ref_block_md */
@@ -2061,7 +2084,7 @@ static int64_t getsize(int is_sg, int fd, uint64_t requested, int doformat)
 int do_rand_trim(worker_ctx * worker)
 {
         workload *wl = worker->wlctx->wl;
-	uint64_t trimoffset = saferandom(&worker->rbuf) * wl->trimsize;
+	uint64_t trimoffset = saferandom64(&worker->rbuf) * wl->trimsize;
 	struct sector_range_s ranges[SECTOR_RANGES_MAX];
 	int left = wl->blocksize;
 	int r;
@@ -2069,7 +2092,7 @@ int do_rand_trim(worker_ctx * worker)
 	while (left > 0) {
 		for (r = 0; r < SECTOR_RANGES_MAX && left > 0; r++) {
 			trimoffset = wl->startoffset +
-                                ((saferandom(&worker->rbuf) * wl->alignsize) % worker->wlctx->len);
+                                ((saferandom64(&worker->rbuf) * wl->alignsize) % worker->wlctx->len);
 			DEBUG3("file %s fd %d trim at offset %"PRId64" size %d",
                                 worker->fctx->file, worker->fctx->fd, worker->offset, wl->trimsize);
 			ranges[r].lba = trimoffset / 512;
@@ -2199,7 +2222,7 @@ static int64 calc_dedup_stamp_modulo(uint64 span, int dedup_likehood)
 
         DEBUG2("blocks for dedup calc %f", blocks);
 
-        dedup_stamp_modulo = (blocks / dedup_likehood) * 100;
+        dedup_stamp_modulo = (blocks / dedup_likehood);
         if (!dedup_stamp_modulo)
                 dedup_stamp_modulo = 1;
 
@@ -2269,10 +2292,7 @@ uint64 next_validation_offset(worker_ctx *worker)
  */
 uint64 seq_offset(worker_ctx *worker)
 {
-       /* wrap around */
-       if (worker->offset + worker->wlctx->wl->blocksize > worker->wlctx->end)
-		return worker->wlctx->start;
-       return worker->offset;
+       return worker->wlctx->start + ((worker->offset - worker->wlctx->start) % worker->wlctx->len);
 }
 
 /**
@@ -2282,8 +2302,10 @@ uint64 next_seq_offset(worker_ctx *worker)
 {
         if (conf.verification_mode)
                 return next_validation_offset(worker);
-        else
-        	return worker->offset + worker->wlctx->wl->blocksize;
+        else {
+                DEBUG3("file %s: seq offset 0x%lx", worker->fctx->file, worker->fctx->seq_offset);
+        	return atomic_fetch_and_add64(&worker->fctx->seq_offset, worker->wlctx->wl->blocksize);
+        }
 }
 
 /**
@@ -2699,6 +2721,10 @@ void init_workload_context(file_ctx *ctx, workload_ctx *wlctx, workload *wl)
         if (wl->len && ctx->size >= wl->startoffset + wl->len)
                 wlctx->len = wl->len;
 
+        /* make sure len is alignd on alignsize */
+        if (wlctx->len % wl->alignsize)
+                wlctx->len -= wlctx->len % wl->blocksize;
+        
         if (wlctx->len < wl->blocksize)
                 PANIC("file/dev %s size %lu doesn't match workload %d start %lu len %lu (wlctx len %ld wl blocksize %d)",
                         ctx->file, ctx->size, wl->num, wl->startoffset, wl->len, wlctx->len, wl->blocksize);
@@ -2913,6 +2939,9 @@ void thread_init_file(file_ctx *ctx)
         /* now that all sizes are known, build the workload ctx for this file */
         for (w = 0; w < total_nworkloads; w++)
                 init_workload_context(ctx, ctx->wlctxs + w, workloads + w);
+        
+        DEBUG("seq offset is set to %ld", startoffset);
+        ctx->seq_offset = startoffset;
 }
 
 /**
@@ -3019,6 +3048,7 @@ void *aio_thread(aio_thread_ctx *athread)
                         worker = myworkers[f][i];
 
                         worker->wlctx = next_workload_ctx(worker);
+                        worker->offset = next_seq_offset(worker);
 
                         r = do_io(worker);
 
@@ -3169,9 +3199,9 @@ void* sync_thread(io_thread_ctx *io_thread)
          * In verification mode, make thread # on this file to start from # block. 
          * Note that we use the fact that there is only one workload.
          */
+        worker->wlctx = next_workload_ctx(worker);
+        worker->offset = next_seq_offset(worker);
         if (conf.verification_mode) {
-                worker->wlctx = next_workload_ctx(worker);
-                worker->offset = workloads[0].blocksize * (io_thread->num % conf.nthreads);
                 worker->offset = find_next_validation_offset(worker);
                 DEBUG("io thread %d file %s set offset to %lu", io_thread->num, worker->fctx->file, worker->offset);
         }
@@ -3285,9 +3315,9 @@ void usage(void)
         printf("\t\t-P/--stampblock <size > - size of block to use when stamping writes. "
                 "Stamp is the dedup/write stamp (see -p) and/or offset stamp (see -O). Size 0 disables data stamping"
                 " [the default size is smallest of block size or 4k (see -b)]\n");
-        printf("\t\t-p/--dedup <expected dedup percent> control the expected dedup rate (in percent) per device. "
-                "E.g. 120 is %%120 dedup factor or 1.2. -1 to disable the dedup stamp patterns, "
-                "0 for no dedup.> [0 == no dedup]\n");
+        printf("\t\t-p/--dedup <expected dedup percent> control the expected dedup rate per device. "
+                "E.g. 12 should result dedup factor or 12 after the target data set is filled at least once. "
+                "Use -1 to disable the dedup stamp patterns, 0 for no dedup.> [0 == no dedup]\n");
         printf("\t\t-O/--offset_stamp  - use offset stamp, one per stamp block [No]\n");
         printf("\t\t-m/--block_md <base-filename>  - use specified string + dev name as file to load/save"
                 "verification md. If only a single file is given, the base will be used as the md file name."
@@ -3531,11 +3561,11 @@ static void parse_weight(workload *wl, char* optarg)
 static void parse_dedup_likelihood(workload *wl, char* optarg)
 {
         wl->dedup_likehood = (uint64)atoi(optarg);
-        if ((wl->dedup_likehood < -1) || (wl->dedup_likehood > 100000))
-                PANIC("invalid dedup likelihood, should be number between 0 and 100000 "
-                        "(== expected dedup factor of 1000.00): %s", optarg);
-        printf("Dedup rate is %d (expected dedup factor %d.%d)\n",
-                wl->dedup_likehood, wl->dedup_likehood / 100, wl->dedup_likehood % 100);
+        if ((wl->dedup_likehood < -1) || (wl->dedup_likehood > 1000000))
+                PANIC("invalid dedup likelihood, should be number between 0 and 1000000 "
+                        "(== expected dedup factor of 1000000): %s", optarg);
+        printf("Dedup rate is %d (expected dedup factor %d)\n",
+                wl->dedup_likehood, wl->dedup_likehood);
 }
 
 /**
@@ -3842,6 +3872,8 @@ int main(int argc, char **argv)
                 
 		switch (opt) {
 		default:
+                case '\0': /* handled by extension */
+                        break;
 		case 'h':
 			usage();
 			break;
@@ -4025,6 +4057,8 @@ int main(int argc, char **argv)
         }
         
         init_debug_lines();
+
+        btest_ext_init(&(shared.ext));
         
         if (conf.verification_mode) {
                 conf.preformat = 0;
