@@ -1,3 +1,13 @@
+110930 - Version 130:
+    - fix doc (usage)
+    - bump btest version v130
+    - dedup modulo to a simple int
+    - fix seq+aio (see multi threads)
+    - fix seq and multi threads - will follow instead of replicating offsets
+    - imporve md alloc, handle md alloc failure (was a infinite loop)
+    - Fix extension, add hash pool tests
+    - fix dedup stamps such that each device will gets its own symbol set
+
 110525 - Version 121-1:
 -fix async summary report bug (duration should be =/ ndev)
 
