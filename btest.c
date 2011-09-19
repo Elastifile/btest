@@ -136,7 +136,7 @@
 #include "btest_data_struct.h"
 #include "sg_read.h"
 
-#define BTEST_VERSION 130
+#define BTEST_VERSION 131
 #define xstr(s) str(s)
 #define str(s) #s
 #define BTEST_COMMIT xstr(COMMIT)
@@ -202,7 +202,7 @@ int minblocksize;           /**< min block size among all workloads */
 loff_t startoffset;         /**< Offset of first byte of the IO region within the file/dev */
 loff_t endoffset;           /**< Offset of last byte +1 of the IO region within the file/dev. 0 is use dev size */
 int readonly;               /**< we are read only if we do not have a writing workload */
-int use_stamps;             /**< do we use dedup stamps? */
+int use_stamps;             /**< do we use dedup stamps? 1 is random fill, 2 is progress fill */
 
 volatile int started;
 volatile int finished;
@@ -960,9 +960,22 @@ block_worker_md *alloc_block_worker_md(worker_ctx *worker, uint64 stamp, uint64 
  *
  * This stamp is also used for verification (see the header notes).
  */
-uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size)
+uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size, uint dedup_likehood, uint32 *counter)
 {
         uint64 stamp;
+        static uint64 last = 1;         /* just in case last is used before first init */
+        
+        /* Progressive fill, use same stamp 'dedup_likehood' times */
+        if (use_stamps > 1) {
+                if (atomic_fetch_and_inc32(counter) % dedup_likehood)
+                        return last;
+                /* races may happen, but how cares? */
+                last = saferandom64(rand_buff);
+                if (last == 0)
+                        last++;
+                return last;
+        }
+                
 
         stamp = saferandom64(rand_buff);
         /* module == 0 means no dedup - keep stamp as it is */
@@ -999,15 +1012,17 @@ int stamp_block(worker_ctx *worker, char *buf, int len, uint64 offset, int write
 {
         block_worker_md *wmd, *owner = 0;
         file_ctx *fctx = worker->fctx;
+        workload_ctx *wlctx = worker->wlctx;
         uint64 blockid, stamp;
         block_md *md;
 
-        if (worker->wlctx->dedup_stamp_modulo < 0 || len < sizeof(uint64))
+        if (wlctx->dedup_stamp_modulo < 0 || len < sizeof(uint64))
                 return 0;
 
         blockid = offset / conf.stampblock;
         md = fctx->shared.md + blockid;
-        stamp = generate_dedup_stamp(&worker->rbuf, worker->wlctx->dedup_stamp_modulo);
+        stamp = generate_dedup_stamp(&worker->rbuf, wlctx->dedup_stamp_modulo,
+                                     wlctx->wl->dedup_likehood, &wlctx->dedup_fill_counter);
         
         if (conf.verify) {
                 /*
@@ -3247,6 +3262,7 @@ static struct option btest_long_options[] = {
         {"async_io", 1, 0, 'w'},
         {"stampblock", 1, 0, 'P'},
         {"dedup", 1, 0, 'p'},
+        {"progressive", 0, 0, 'g'},
         {"offset_stamp", 0, 0, 'O'},
         {"block_md", 1, 0, 'm'},
         {"check_scan", 1, 0, 'C'},
@@ -3315,9 +3331,12 @@ void usage(void)
         printf("\t\t-P/--stampblock <size > - size of block to use when stamping writes. "
                 "Stamp is the dedup/write stamp (see -p) and/or offset stamp (see -O). Size 0 disables data stamping"
                 " [the default size is smallest of block size or 4k (see -b)]\n");
-        printf("\t\t-p/--dedup <expected dedup percent> control the expected dedup rate per device. "
+        printf("\t\t-p/--dedup <expected dedup> control the expected dedup rate per device. "
                 "E.g. 12 should result dedup factor or 12 after the target data set is filled at least once. "
                 "Use -1 to disable the dedup stamp patterns, 0 for no dedup.> [0 == no dedup]\n");
+        printf("\t\t-g/--progressive  - if dedup pattern is requested, use a progressive fill instead of the default "
+                "random one. This may be important if the target object is not being completely filled "
+                "(e.g. due its large size).\n");
         printf("\t\t-O/--offset_stamp  - use offset stamp, one per stamp block [No]\n");
         printf("\t\t-m/--block_md <base-filename>  - use specified string + dev name as file to load/save"
                 "verification md. If only a single file is given, the base will be used as the md file name."
@@ -3685,8 +3704,11 @@ void init_workloads(void)
         for (w = 0; w < total_nworkloads; w++) {
                 workload *wl = workloads + w;
 
-                if (wl->dedup_likehood >=0)
-                        use_stamps = 1;        
+                if (wl->dedup_likehood >=0) {
+                        use_stamps = 1;
+                        if (wl->progressive_dedup)
+                                use_stamps = 2;
+                }
                 if (wl->startoffset < start)
                         start = wl->startoffset;
                 if (wl->readratio < 100)
@@ -3862,7 +3884,7 @@ int main(int argc, char **argv)
 
         optind = 0;
         /* allow extensions to add options */
-        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:zie",
+        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:zieg",
                                    btest_long_options, &unified_long_options);
 
 	while ((opt = getopt_long(argc, argv, optstr, unified_long_options, NULL)) != -1) {
@@ -3984,6 +4006,13 @@ int main(int argc, char **argv)
 		case 'p':
                         check_mode("dedup likelihood (-p)", 1, -1);
                         parse_dedup_likelihood(wl, optarg);
+                        workload_defined = 1;
+                        printf("Use dedup likehood %d\n", wl->dedup_likehood);
+			break;
+		case 'g':
+                        check_mode("dedup generation progressive (-g)", 1, -1);
+                        wl->progressive_dedup = 1;
+                        printf("Use progressive dedup fill\n");
                         workload_defined = 1;
 			break;
                 case 'O':

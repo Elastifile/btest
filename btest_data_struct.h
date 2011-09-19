@@ -86,6 +86,7 @@ struct workload {
 	loff_t startoffset;	/**< Offset of first byte in the IO region within the file/dev */
 	uint64 len;		/**< Length of IO region (starting at 'startoffset'. 0 -> up to end of file */
         int dedup_likehood;     /**< Modulul stamp in this value to enlarge dedup likelihood */
+        int progressive_dedup;  /**< Keep dedup factor at requested factor right from the start */
         int weight;             /**< Weight of this workload in case of multiple ones */
         int use_offset_stamps;  /**< fill block data with offset stamps */
 
@@ -139,6 +140,7 @@ struct workload_ctx {
         uint64 len;                 /**< length of data range for this workload */
         uint64 start;               /**< convenience: start offset of workload */
         uint64 end;                 /**< convenience: end offset of workload */
+        uint32 dedup_fill_counter;  /**< for progressive dedup fills */
 
         workload *wl;               /**< used workload */
 };
