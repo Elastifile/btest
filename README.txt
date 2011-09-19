@@ -1,4 +1,7 @@
-110930 - Version 130:
+110919 - Version 131:
+	- add progressive dedup fill mode (-g)
+
+110830 - Version 130:
     - fix doc (usage)
     - bump btest version v130
     - dedup modulo to a simple int
