@@ -31,7 +31,10 @@ test:
 	@echo "Target: " ${TARGET} " commit: "${commit} " hdrs: " ${HDRS} " srcs: " ${SRCS} " libs: " ${LIBS} " objs: " ${OBJS}
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) *.gz
 
 %.o: %.c $(HDRS)
 	$(CC) $(CFLAGS) -c -g -O3 -D _LARGEFILE64_SOURCE -DCOMMIT="${commit}" -Wall -o $@ $<
+
+tar: $(TARGET)
+	rev=`./$(TARGET) -V | cut -f 3 -d " "` && echo $$rev && git archive --format=tar --prefix=btest-$$rev/ HEAD | gzip >btest-$$rev.tar.gz
