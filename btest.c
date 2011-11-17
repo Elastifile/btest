@@ -203,6 +203,7 @@ loff_t startoffset;         /**< Offset of first byte of the IO region within th
 loff_t endoffset;           /**< Offset of last byte +1 of the IO region within the file/dev. 0 is use dev size */
 int readonly;               /**< we are read only if we do not have a writing workload */
 int use_stamps;             /**< do we use dedup stamps? 1 is random fill, 2 is progress fill */
+uint64 fixstamp;            /**< used for "-p -1 " */
 
 volatile int started;
 volatile int finished;
@@ -960,14 +961,18 @@ block_worker_md *alloc_block_worker_md(worker_ctx *worker, uint64 stamp, uint64 
  *
  * This stamp is also used for verification (see the header notes).
  */
-uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size, uint dedup_likehood, uint32 *counter)
+uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size, int dedup_likehood, uint32 *counter)
 {
         uint64 stamp;
         static uint64 last = 1;         /* just in case last is used before first init */
         
+        /* fixed stamp "-p -2" */
+        if (dedup_likehood < 0)
+                return fixstamp;
+        
         /* Progressive fill, use same stamp 'dedup_likehood' times */
         if (use_stamps > 1) {
-                if (atomic_fetch_and_inc32(counter) % dedup_likehood)
+                if (dedup_likehood > 0 && (atomic_fetch_and_inc32(counter) % dedup_likehood))
                         return last;
                 /* races may happen, but how cares? */
                 last = saferandom64(rand_buff);
@@ -975,7 +980,6 @@ uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size, u
                         last++;
                 return last;
         }
-                
 
         stamp = saferandom64(rand_buff);
         /* module == 0 means no dedup - keep stamp as it is */
@@ -2232,9 +2236,12 @@ static int64 calc_dedup_stamp_modulo(uint64 span, int dedup_likehood)
         if (dedup_likehood == 0)
                 return 0;       /* no dedup - use full symbol range */
 
-        if (dedup_likehood < 0)
+        if (dedup_likehood == -1)
                 return -1;      /* do not use stamps at all */
 
+        if (dedup_likehood == -2)
+                return 1;      /* use fixed stamps at all */
+        
         DEBUG2("blocks for dedup calc %f", blocks);
 
         dedup_stamp_modulo = (blocks / dedup_likehood);
@@ -3333,7 +3340,7 @@ void usage(void)
                 " [the default size is smallest of block size or 4k (see -b)]\n");
         printf("\t\t-p/--dedup <expected dedup> control the expected dedup rate per device. "
                 "E.g. 12 should result dedup factor or 12 after the target data set is filled at least once. "
-                "Use -1 to disable the dedup stamp patterns, 0 for no dedup.> [0 == no dedup]\n");
+                "Use -1 to disable the dedup stamp patterns, -2 for fixed stamp, 0 for no dedup.> [0 == no dedup]\n");
         printf("\t\t-g/--progressive  - if dedup pattern is requested, use a progressive fill instead of the default "
                 "random one. This may be important if the target object is not being completely filled "
                 "(e.g. due its large size).\n");
@@ -3580,10 +3587,14 @@ static void parse_weight(workload *wl, char* optarg)
 static void parse_dedup_likelihood(workload *wl, char* optarg)
 {
         wl->dedup_likehood = (uint64)atoi(optarg);
-        if ((wl->dedup_likehood < -1) || (wl->dedup_likehood > 1000000))
+        if ((wl->dedup_likehood < -2) || (wl->dedup_likehood > 1000000))
                 PANIC("invalid dedup likelihood, should be number between 0 and 1000000 "
                         "(== expected dedup factor of 1000000): %s", optarg);
-        printf("Dedup rate is %d (expected dedup factor %d)\n",
+        if (wl->dedup_likehood == -1)
+                printf("Dedup stamps are disabled\n");
+        else if (wl->dedup_likehood == -2)
+                printf("Dedup stamp is fixed\n");
+        else printf("Dedup rate is %d (expected dedup factor %d)\n",
                 wl->dedup_likehood, wl->dedup_likehood);
 }
 
@@ -3704,11 +3715,10 @@ void init_workloads(void)
         for (w = 0; w < total_nworkloads; w++) {
                 workload *wl = workloads + w;
 
-                if (wl->dedup_likehood >=0) {
+                if (wl->dedup_likehood != -1)
                         use_stamps = 1;
-                        if (wl->progressive_dedup)
-                                use_stamps = 2;
-                }
+                if (wl->dedup_likehood > 0 && wl->progressive_dedup)
+                        use_stamps = 2;
                 if (wl->startoffset < start)
                         start = wl->startoffset;
                 if (wl->readratio < 100)
@@ -3858,8 +3868,9 @@ int main(int argc, char **argv)
 {
         struct option *unified_long_options;
         IOModel model = IO_MODEL_INVALID;
-        workload *wl;
+        struct drand48_data rbuf;
         pthread_t thid = 0;
+        workload *wl;
         char *optstr;
 	int i, j, opt;
         
@@ -4007,7 +4018,6 @@ int main(int argc, char **argv)
                         check_mode("dedup likelihood (-p)", 1, -1);
                         parse_dedup_likelihood(wl, optarg);
                         workload_defined = 1;
-                        printf("Use dedup likehood %d\n", wl->dedup_likehood);
 			break;
 		case 'g':
                         check_mode("dedup generation progressive (-g)", 1, -1);
@@ -4088,6 +4098,12 @@ int main(int argc, char **argv)
         init_debug_lines();
 
         btest_ext_init(&(shared.ext));
+        
+        if (wl->dedup_likehood == -2) {
+                srand48_r(conf.rseed, &rbuf);
+                fixstamp = saferandom64(&rbuf);
+                printf("use fixed stamp %"PRIx64"\n", fixstamp); 
+        }
         
         if (conf.verification_mode) {
                 conf.preformat = 0;
