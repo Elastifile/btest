@@ -1,3 +1,6 @@
+111121 - Version 140:
+	- add static data patterns, compression control
+
 110919 - Version 131:
 	- add progressive dedup fill mode (-g)
 
