@@ -3740,10 +3740,13 @@ static void verify_sizes(workload *wl)
         if (conf.verify && conf.stampblock && (wl->alignsize % conf.stampblock))
                 PANIC("stampblock size %d must be aligned with alignsize %d", conf.stampblock, wl->alignsize);
 
+        DEBUG2("start offset %ld align %d", wl->startoffset, wl->alignsize);
+        
         if (wl->startoffset % wl->alignsize) {
                 uint64 fix = wl->alignsize - (wl->startoffset % wl->alignsize);
                 wl->startoffset += fix;
-                wl->len -= fix;
+                if (wl->len)
+                        wl->len -= fix;
                 printf("startoffset is changed to %"PRId64" and len to %"PRId64" to match alignment size %d\n",
                         wl->startoffset, wl->len, wl->alignsize);
         }
