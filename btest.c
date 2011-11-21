@@ -157,6 +157,7 @@ BtestConf conf = {
         .exit_eof = 0,                  /** exit on end of file? */
         .block_md_base = NULL,          /** by default no md file is used */
         .stampblock = -1,               /** by default stamp block is set to the block size */
+        .compression = 0,               /** by default - no compression */
         .aio_window_size = 0,           /** by default aio mode is not used (window == 0) */
 
         .preformat = 0,                 /** by default no preformating is done */
@@ -2967,6 +2968,53 @@ void thread_init_file(file_ctx *ctx)
 }
 
 /**
+ * Fill data buf with the correct data pattern. Data pattern is generated once and copied to all data buffers.
+ */
+static void init_data_buf(void *buf, size_t size)
+{
+        struct drand48_data rbuf;
+        static void *savebuf;
+        static int initialized;
+        uint32 *u, *e;
+        int r;
+  
+        shared.lock_func();
+        if (initialized++)
+                goto saved;
+        
+        if (!(savebuf = malloc(maxblocksize)))
+                PANIC("can't alloc memory for data buf %d bytes", maxblocksize);
+        
+        if (conf.compression < 0) {
+                memset(savebuf, 0, maxblocksize);
+                goto saved;
+        }
+        
+        srand48_r(conf.rseed, &rbuf);
+        
+        if (conf.compression == 0) {
+                DEBUG2("fill data buf (%ld byte) with full random data", maxblocksize);
+                /* no compression - fill will random data */
+                for (u = savebuf, e = u + (maxblocksize/sizeof *u); u < e; u++)
+                        *u = saferandom(&rbuf);
+                goto saved;
+        }
+        
+        DEBUG2("fill data buf (%ld byte) with random data compression rate %d", maxblocksize, conf.compression);
+        /* compression rate is given, fill buf with random stamps with repetitions */
+        for (u = savebuf, e = u + (maxblocksize/sizeof *u); u < e; ) {
+                uint32 v = saferandom(&rbuf);
+                for (r = 0; r < conf.compression && u < e; r++, u++)
+                        *u = v;
+        }
+        
+saved:
+        DEBUG2("used saved buf to fill buf (%ld bytes)", size);
+        memcpy(buf, savebuf, size);
+        shared.unlock_func();
+}
+
+/**
  * Allocates and initializes new worker structure
  */
 worker_ctx *new_worker(file_ctx *fctx)
@@ -2984,7 +3032,8 @@ worker_ctx *new_worker(file_ctx *fctx)
         
         if (!(worker->buf = valloc(maxblocksize)))
                 PANIC("can't alloc buf sized %d bytes", maxblocksize);
-        memset(worker->buf, 0, maxblocksize);
+        
+        init_data_buf(worker->buf, maxblocksize);
 
         srand48_r(conf.rseed + worker->num * 10000, &worker->rbuf);
 
@@ -3269,6 +3318,7 @@ static struct option btest_long_options[] = {
         {"async_io", 1, 0, 'w'},
         {"stampblock", 1, 0, 'P'},
         {"dedup", 1, 0, 'p'},
+        {"compression", 1, 0, 'Z'},
         {"progressive", 0, 0, 'g'},
         {"offset_stamp", 0, 0, 'O'},
         {"block_md", 1, 0, 'm'},
@@ -3300,8 +3350,8 @@ static struct option btest_long_options[] = {
 void usage(void)
 {
 	printf("Usage: %s [-hdV -W -D -b <blksz> -a <alignsize> -t <sec> "
-             "-T <threads> -o <start> -l <length> -S <seed> -w <window-size> -p <dedup_likelihood> -P <stampsz> -O "
-             "-m <md_file_base> -v -c "
+             "-T <threads> -o <start> -l <length> -S <seed> -w <window-size> -p <dedup_likelihood> "
+                "-Z <comression_rate> -P <stampsz> -O -m <md_file_base> -v -c "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <S|R|rand-ratio> <R|W|read-ratio> <dev/file> ...\n", prog);
 	printf("\nWorkload file mode:\n       %s [-hdV -W -D -f <workloads filename> -t <sec> "
              "-T <threads> -S <seed> -w <window-size> -m <md_file_base> -v -c "
@@ -3339,8 +3389,11 @@ void usage(void)
                 "Stamp is the dedup/write stamp (see -p) and/or offset stamp (see -O). Size 0 disables data stamping"
                 " [the default size is smallest of block size or 4k (see -b)]\n");
         printf("\t\t-p/--dedup <expected dedup> control the expected dedup rate per device. "
-                "E.g. 12 should result dedup factor or 12 after the target data set is filled at least once. "
+                "E.g. 12 should result dedup factor of 12 after the target data set is filled at least once. "
                 "Use -1 to disable the dedup stamp patterns, -2 for fixed stamp, 0 for no dedup.> [0 == no dedup]\n");
+        printf("\t\t-Z/--compression <expected compression> control the expected compression rate. "
+                "E.g. 12 should result compression factor of 12 for any written blocks. Contradicts offset stamping."
+                "Use -1 to disable the compression patterns, 0 for no compression.> [0 == no compression]\n");
         printf("\t\t-g/--progressive  - if dedup pattern is requested, use a progressive fill instead of the default "
                 "random one. This may be important if the target object is not being completely filled "
                 "(e.g. due its large size).\n");
@@ -3596,6 +3649,20 @@ static void parse_dedup_likelihood(workload *wl, char* optarg)
                 printf("Dedup stamp is fixed\n");
         else printf("Dedup rate is %d (expected dedup factor %d)\n",
                 wl->dedup_likehood, wl->dedup_likehood);
+}
+
+/**
+ * Parse and check the dedup likelihood parameter
+ */
+static void parse_compression(char* optarg)
+{
+        conf.compression = (uint64)atoi(optarg);
+        if ((conf.compression < -2) || (conf.compression > 1000))
+                PANIC("invalid compression, should be number between 0 and 1000: %s", optarg);
+        if (conf.compression == -1)
+                printf("Compression stamps are disabled\n");
+        else
+                printf("Compression rate is %d\n", conf.compression);
 }
 
 /**
@@ -3895,7 +3962,7 @@ int main(int argc, char **argv)
 
         optind = 0;
         /* allow extensions to add options */
-        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:zieg",
+        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:ziegZ:",
                                    btest_long_options, &unified_long_options);
 
 	while ((opt = getopt_long(argc, argv, optstr, unified_long_options, NULL)) != -1) {
@@ -4017,6 +4084,11 @@ int main(int argc, char **argv)
 		case 'p':
                         check_mode("dedup likelihood (-p)", 1, -1);
                         parse_dedup_likelihood(wl, optarg);
+                        workload_defined = 1;
+			break;
+		case 'Z':
+                        check_mode("compression factor (-Z)", 1, -1);
+                        parse_compression(optarg);
                         workload_defined = 1;
 			break;
 		case 'g':

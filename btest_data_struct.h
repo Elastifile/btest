@@ -85,7 +85,7 @@ struct workload {
 	int readratio;		/**< Read IO ratio: 0 is pure write, 100 pure read */
 	loff_t startoffset;	/**< Offset of first byte in the IO region within the file/dev */
 	uint64 len;		/**< Length of IO region (starting at 'startoffset'. 0 -> up to end of file */
-        int dedup_likehood;     /**< Modulul stamp in this value to enlarge dedup likelihood */
+        int dedup_likehood;     /**< Modulu stamp in this value to enlarge dedup likelihood */
         int progressive_dedup;  /**< Keep dedup factor at requested factor right from the start */
         int weight;             /**< Weight of this workload in case of multiple ones */
         int use_offset_stamps;  /**< fill block data with offset stamps */

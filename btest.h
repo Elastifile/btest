@@ -61,6 +61,7 @@ typedef struct BtestConf {
         int exit_eof;
         char *block_md_base;
         int stampblock;                 /**< stamp block size, if it is -1 == "not set", the block size is used */
+        int compression;                /**< compression rate */
         int aio_window_size;
         
         /* configuration flags */
