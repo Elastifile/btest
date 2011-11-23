@@ -1606,7 +1606,7 @@ void dostats(int sig)
 void do_timeout_check()
 {
 	worker_ctx *worker, *e;
-        struct timespec now;
+        struct timespec now, start;
         uint64 duration;
         
         DEBUG2("timeout check");
@@ -1614,8 +1614,13 @@ void do_timeout_check()
 
         shared.lock_func(); 
 	for (worker = workers, e = worker + total_nworkers; worker < e; worker++) {
+                /* skip worker that are done - IO is not in progress */
                 if (worker->end_time.tv_nsec || worker->end_time.tv_sec)
-                        break;
+                        continue;
+                start = worker->start_time;
+                /* skip worker that started after 'now' */
+                if (start.tv_sec > now.tv_sec || (start.tv_sec == now.tv_sec && start.tv_nsec > now.tv_nsec))
+                        continue;
                 duration = (now.tv_sec - worker->start_time.tv_sec) * 1000000llu +
                            (now.tv_nsec - worker->start_time.tv_nsec) / 1000;
                 if (duration/1000 > conf.timeout_ms)
@@ -2497,8 +2502,8 @@ int do_io(worker_ctx *worker)
         workload *wl = wlctx->wl;
 	int doread = 0, dorandom = 0;
 
-        clock_gettime(CLOCK_REALTIME, &(worker->start_time));
         memset(&worker->end_time, 0, sizeof worker->end_time);  /* mark as not finished */
+        clock_gettime(CLOCK_REALTIME, &(worker->start_time));
         
         if (conf.num_op_limit) {
                 if (total_ops >= conf.num_op_limit) {
