@@ -1,3 +1,6 @@
+111123 - Version 141:
+	- add timeout check, update doc
+
 111121 - Version 140:
 	- add static data patterns, compression control
 
