@@ -152,6 +152,7 @@ BtestConf conf = {
         .def_blocksize = 4 * 1024,      /** default is 4k */
         .diff_interval = 10,            /** default diff report interval is 10 seconds */
         .subtotal_interval = 0,         /** by default subtotal report interval is off */
+        .timeout_ms = 1000,             /** by default check for stale IOs each second */
         .rseed = 0,                     /** default rseed is set by main (time) */
         .num_op_limit = 0,              /** by default the test is not operation number limited */
         .exit_eof = 0,                  /** exit on end of file? */
@@ -1599,6 +1600,33 @@ void dostats(int sig)
 }
 
 /**
+ * Check for timeouts - scan all workers and search for a worker that exceeded the timeout.
+ * Panic if such worker is found
+ */
+void do_timeout_check()
+{
+	worker_ctx *worker, *e;
+        struct timespec now;
+        uint64 duration;
+        
+        DEBUG2("timeout check");
+        clock_gettime(CLOCK_REALTIME, &now);
+
+        shared.lock_func(); 
+	for (worker = workers, e = worker + total_nworkers; worker < e; worker++) {
+                if (worker->end_time.tv_nsec || worker->end_time.tv_sec)
+                        break;
+                duration = (now.tv_sec - worker->start_time.tv_sec) * 1000000llu +
+                           (now.tv_nsec - worker->start_time.tv_nsec) / 1000;
+                if (duration/1000 > conf.timeout_ms)
+                        PANIC("IO (worker %d) on '%s' offset %ld block size %d didn't complete after %ld micro seconds",
+                                worker->num, worker->fctx->file, worker->offset, worker->wlctx->wl->blocksize,
+                                duration);
+        }
+	shared.unlock_func();
+}
+
+/**
  * Main differential subtotal statistics generation function.
  * 
  * This function is called by the real time reports thread using the option -r frequency or by the signal USR2
@@ -1851,6 +1879,27 @@ static void realtime_reports(int left)
 			dostats(0);
 
 		enable_signals();
+	}
+}
+
+/**
+ * Real time report main thread loop
+ * 
+ * Repeatedly sleep until next report has to be generated, generate the required report(s) and so on.
+ */
+static void timeout_check(int tick)
+{
+	struct timespec duration = {0}, remaining = {0};
+
+        DEBUG2("timeout check starting. Check interval %d seconds", tick);
+	while (!finished) {
+
+		duration.tv_sec = tick;
+
+		while (nanosleep(&duration, &remaining) < 0)
+			duration = remaining;
+
+                do_timeout_check();
 	}
 }
 
@@ -2449,7 +2498,8 @@ int do_io(worker_ctx *worker)
 	int doread = 0, dorandom = 0;
 
         clock_gettime(CLOCK_REALTIME, &(worker->start_time));
-
+        memset(&worker->end_time, 0, sizeof worker->end_time);  /* mark as not finished */
+        
         if (conf.num_op_limit) {
                 if (total_ops >= conf.num_op_limit) {
                         finished = 1;
@@ -2897,7 +2947,12 @@ int io_ended(worker_ctx *worker, int ioret, int update_stats)
         clock_gettime(CLOCK_REALTIME, &(worker->end_time));
 
         duration = (worker->end_time.tv_sec - worker->start_time.tv_sec) * 1000000llu +
-                   (worker->end_time.tv_nsec - worker->start_time.tv_nsec) / 1000.0;
+                   (worker->end_time.tv_nsec - worker->start_time.tv_nsec) / 1000;
+        if (conf.timeout_ms && duration/1000 > conf.timeout_ms)
+                PANIC("IO (worker %d) on '%s' offset %ld block size %d didn't complete after %ld micro seconds",
+                        worker->num, worker->fctx->file, worker->offset, worker->wlctx->wl->blocksize,
+                        duration);
+
         if (duration > stats->max_duration)
                 stats->max_duration = duration;
         if (duration > stats->last_max_duration)
@@ -3330,6 +3385,7 @@ static struct option btest_long_options[] = {
         {"write_behind", 0, 0, 'W'},
         {"direct", 0, 0, 'D'},
         {"activity_check", 0, 0, 'A'},
+        {"timeout", 1, 0, 'B'},
 
         {"diff_report_interval", 1, 0, 'r'},
         {"subtotal_report_internal", 1, 0, 'R'},
@@ -3351,7 +3407,7 @@ void usage(void)
 {
 	printf("Usage: %s [-hdV -W -D -b <blksz> -a <alignsize> -t <sec> "
              "-T <threads> -o <start> -l <length> -S <seed> -w <window-size> -p <dedup_likelihood> "
-                "-Z <comression_rate> -P <stampsz> -O -m <md_file_base> -v -c "
+                "-Z <comression_rate> -B <timeout_ms> -P <stampsz> -O -m <md_file_base> -v -c "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <S|R|rand-ratio> <R|W|read-ratio> <dev/file> ...\n", prog);
 	printf("\nWorkload file mode:\n       %s [-hdV -W -D -f <workloads filename> -t <sec> "
              "-T <threads> -S <seed> -w <window-size> -m <md_file_base> -v -c "
@@ -3401,6 +3457,10 @@ void usage(void)
         printf("\t\t-m/--block_md <base-filename>  - use specified string + dev name as file to load/save"
                 "verification md. If only a single file is given, the base will be used as the md file name."
                 "Used by -v/-y options [%s]\n", conf.block_md_base);
+	printf("\tReal Time checks:\n");
+        printf("\t\t-A/--activity_check  - exit if there were no successful I/Os in the last interval \n");
+        printf("\t\t-B/--timeout_ms  -  break if an IO duration exceeds that specified msec value. "
+                "Set to 0 to disable check [default %d msec]\n", conf.timeout_ms);
         printf("\t\t-v/--verify  - verify stamps after each read (see options -p, -P and -O [False]\n");
         printf("\t\t-c/--check  - like verify, but stop on verification errors [False]\n");
         printf("\t\t-i/--ignore_errors  - do not stop on errors, just count them [False]\n");
@@ -3408,7 +3468,6 @@ void usage(void)
 	printf("\t\t(Default -  O_CREAT | O_LARGEFILE | O_NOATIME | O_SYNC)\n");
 	printf("\t\t-W/--write_behind : Write behind mode : O_CREAT | O_LARGEFILE | O_NOATIME \n");
 	printf("\t\t-D/--direct  - use direct IO mode : O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT \n");
-        printf("\t\t-A/--activity_check  - exit if there were no successful I/Os in the last interval \n");
 	printf("\tReal Time Reports:\n");
 	printf("\t\tsignal SIGUSR1 prints reports until now\n");
 	printf("\t\tsignal SIGUSR2 prints reports from last report\n");
@@ -3466,6 +3525,20 @@ void *stats_main(void* arg)
 	disable_signals();
 
         finished = 1;
+
+        return NULL; 
+}
+
+/**
+ * Real time report thread entry function
+ */
+void *timeout_check_main(void* arg)
+{
+        while (!started) {
+                usleep(100 * 1000);
+        }
+
+	timeout_check((conf.timeout_ms + 999)/1000);
 
         return NULL; 
 }
@@ -3965,7 +4038,7 @@ int main(int argc, char **argv)
 
         optind = 0;
         /* allow extensions to add options */
-        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:ziegZ:",
+        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:ziegZ:B:",
                                    btest_long_options, &unified_long_options);
 
 	while ((opt = getopt_long(argc, argv, optstr, unified_long_options, NULL)) != -1) {
@@ -4003,6 +4076,10 @@ int main(int argc, char **argv)
                 case 'A':
                         conf.activity_check = 1;
                         printf("Turn on activity check\n");
+                        break;
+                case 'B':
+                        conf.timeout_ms = atoi(optarg);
+			printf("Set timeout check to %d msec\n", conf.timeout_ms);
                         break;
 		case 'b': 
                         check_mode("blocksize (-b)", 1, -1);
@@ -4225,6 +4302,9 @@ int main(int argc, char **argv)
         if (pthread_create(&thid, NULL, (void *(*)(void *))stats_main, NULL))
                 PANIC("Stats main thread creation failed");
 
+        if (conf.timeout_ms && pthread_create(&thid, NULL, (void *(*)(void *))timeout_check_main, NULL))
+                PANIC("timeout main thread creation failed");
+                
         if (workload_filename) {
                 int workload_weight_ix = 0;
                 
