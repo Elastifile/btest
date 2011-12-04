@@ -663,9 +663,11 @@ uint64 parse_storage_size(char *arg)
         case 'P':
         case 'p':
                 factor = 1lu << 50;
+                break;
         case 'T':
         case 't':
                 factor = 1lu << 40;
+                break;
 	case 'G':
 	case 'g':
 		factor = 1 << 30;
