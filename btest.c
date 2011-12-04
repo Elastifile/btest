@@ -153,6 +153,7 @@ BtestConf conf = {
         .diff_interval = 10,            /** default diff report interval is 10 seconds */
         .subtotal_interval = 0,         /** by default subtotal report interval is off */
         .timeout_ms = 1000,             /** by default check for stale IOs each second */
+        .warmup_sec = 0,                /** no warmup */
         .rseed = 0,                     /** default rseed is set by main (time) */
         .num_op_limit = 0,              /** by default the test is not operation number limited */
         .exit_eof = 0,                  /** exit on end of file? */
@@ -206,10 +207,6 @@ loff_t endoffset;           /**< Offset of last byte +1 of the IO region within 
 int readonly;               /**< we are read only if we do not have a writing workload */
 int use_stamps;             /**< do we use dedup stamps? 1 is random fill, 2 is progress fill */
 uint64 fixstamp;            /**< used for "-p -1 " */
-
-volatile int started;
-volatile int finished;
-volatile int stall;
 
 
 void(*th_busywait)();
@@ -271,6 +268,53 @@ struct shared {
         btest_extension ext;
 
 } shared = {PTHREAD_COND_INITIALIZER, PTHREAD_MUTEX_INITIALIZER,};
+
+/*************************************************************************
+ * Global state functions and enums
+ ************************************************************************/
+
+typedef enum BtestStates {
+        INVALID,
+        STARTING,
+        WARMINGUP,
+        RUNNING,
+        FINISHED,
+        SUMMARY,
+        LAST_STATE
+} BtestStates;
+
+volatile BtestStates btest_state;
+
+char *btest_state_str[] = {
+        [INVALID] "invalid",
+        [STARTING] "starting",
+        [WARMINGUP] "warming up",
+        [RUNNING] "running",
+        [FINISHED] "finishing",
+        [SUMMARY] "end",
+        [LAST_STATE] 0
+};
+
+static char *state_str(BtestStates state)
+{
+        if (state > INVALID && state <= LAST_STATE)
+                return btest_state_str[state];
+        return "???";
+}
+
+static int state_reached(BtestStates state)
+{
+        return (int)state <= (int)btest_state;
+}
+
+static int state_set(BtestStates state, int force)
+{
+        if (!force && ((int)state != (int)btest_state + 1) && (state != btest_state))
+                PANIC("bad state transition: %s (%d) to %s (%d)", state_str(btest_state), btest_state,
+                        state_str(state), state);
+        DEBUG("Btest state has changed to %s (%d)", state_str(state), state);
+        return btest_state = state;
+}
 
 /**********************************************************************************************************************
  * Common Utility Functions
@@ -516,7 +560,7 @@ void warn(const char *fn, char *msg, ...)
 	va_end(va);
 	buf[n] = 0;
 
-	fprintf(stderr, "[%s(%d):%" PRIx64 "]: %s: %s\n", prog, gettid(), timestamp(), fn, buf);
+	fprintf(stderr, "[%s(%d):%019" PRId64 "]: %s: %s\n", prog, gettid(), timestamp(), fn, buf);
 }
 
 /**********************************************************************************
@@ -1674,7 +1718,7 @@ void update_shared_stats(IOStats *stats)
         
         shared.finished++;
         if (shared.finished >= shared.started)
-                finished = 1;
+                state_set(FINISHED, 0);
         shared.total.errors += stats->errors;
         shared.total.verify_errors += stats->verify_errors;
         shared.total.ops += stats->ops;
@@ -1709,7 +1753,7 @@ int start(int n)
 	time(&t);
 	printf("%d threads are ready, starting test at %s", n, ctime(&t));
 	shared.cond_broadcast_func(n);
-        started = 1;
+        state_set(WARMINGUP, 0);
 	return 0;
 }
 
@@ -1762,7 +1806,7 @@ int finish(int n)
  */
 void exit_signal(int sig)
 {
-        finished = 1;
+        state_set(FINISHED, 1);
 }
 
 /**
@@ -1795,9 +1839,7 @@ void doexit()
 	time(&t);
 	printf("Test is done at %s", ctime(&t));
 
-        if (!stall) {
-                exit(0);
-        }
+        exit(0);
 }
 
 /**
@@ -1865,9 +1907,8 @@ static void realtime_reports(int left)
 			tick = left;
 		duration.tv_sec = tick;
 
-                if (finished) {
+                if (state_reached(FINISHED))
                         break;
-                }
 
 		while (nanosleep(&duration, &remaining) < 0)
 			duration = remaining;
@@ -1897,7 +1938,7 @@ static void timeout_check(int tick)
 	struct timespec duration = {0}, remaining = {0};
 
         DEBUG2("timeout check starting. Check interval %d seconds", tick);
-	while (!finished) {
+	while (!state_reached(FINISHED)) {
 
 		duration.tv_sec = tick;
 
@@ -2505,9 +2546,9 @@ int do_io(worker_ctx *worker)
         memset(&worker->end_time, 0, sizeof worker->end_time);  /* mark as not finished */
         clock_gettime(CLOCK_REALTIME, &(worker->start_time));
         
-        if (conf.num_op_limit) {
+        if (conf.num_op_limit && state_reached(RUNNING)) {
                 if (total_ops >= conf.num_op_limit) {
-                        finished = 1;
+                        state_set(FINISHED, 1);
                         return 1;
                 }
                 atomic_fetch_and_inc64(&total_ops);
@@ -2946,7 +2987,7 @@ int io_ended(worker_ctx *worker, int ioret, int update_stats)
         }
         if (ioret == 1 || worker->offset == ~0ul)
                 return -1; /* end of test reached */
-        if (!update_stats)
+        if (!update_stats || !state_reached(RUNNING))
                 return 0;       /* OK */
 
         clock_gettime(CLOCK_REALTIME, &(worker->end_time));
@@ -3251,7 +3292,7 @@ void *aio_thread(aio_thread_ctx *athread)
                                 completed_iocb->u.c.offset,
                                 event->res2, event->res);*/
 
-                        if (io_ended(worker, r, 1) < 0 || finished)
+                        if (io_ended(worker, r, 1) < 0 || state_reached(FINISHED))
                                 continue;       /* of end of the keep looping to close the window */
 
                         /* send another io */
@@ -3339,7 +3380,7 @@ void* sync_thread(io_thread_ctx *io_thread)
         
 	DEBUG("%d: worker on thread ['%s']: Start", worker->tid, worker->fctx->file);
 
-        while (!finished) {
+        while (!state_reached(FINISHED)) {
                 worker->wlctx = next_workload_ctx(worker);
                 
                 r = do_io(worker);
@@ -3391,6 +3432,7 @@ static struct option btest_long_options[] = {
         {"direct", 0, 0, 'D'},
         {"activity_check", 0, 0, 'A'},
         {"timeout", 1, 0, 'B'},
+        {"warmup", 1, 0, 'u'},
 
         {"diff_report_interval", 1, 0, 'r'},
         {"subtotal_report_internal", 1, 0, 'R'},
@@ -3412,7 +3454,7 @@ void usage(void)
 {
 	printf("Usage: %s [-hdV -W -D -b <blksz> -a <alignsize> -t <sec> "
              "-T <threads> -o <start> -l <length> -S <seed> -w <window-size> -p <dedup_likelihood> "
-                "-Z <comression_rate> -B <timeout_ms> -P <stampsz> -O -m <md_file_base> -v -c "
+                "-Z <comression_rate> -B <timeout_ms> -u <warmup_sec> -P <stampsz> -O -m <md_file_base> -v -c "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <S|R|rand-ratio> <R|W|read-ratio> <dev/file> ...\n", prog);
 	printf("\nWorkload file mode:\n       %s [-hdV -W -D -f <workloads filename> -t <sec> "
              "-T <threads> -S <seed> -w <window-size> -m <md_file_base> -v -c "
@@ -3466,6 +3508,8 @@ void usage(void)
         printf("\t\t-A/--activity_check  - exit if there were no successful I/Os in the last interval \n");
         printf("\t\t-B/--timeout_ms  -  break if an IO duration exceeds that specified msec value. "
                 "Set to 0 to disable check [default %d msec]\n", conf.timeout_ms);
+        printf("\t\t-u/--warmup <sec> - run workload for the specified seconds period before starting test "
+                "[default %d msec]\n", conf.warmup_sec);
         printf("\t\t-v/--verify  - verify stamps after each read (see options -p, -P and -O [False]\n");
         printf("\t\t-c/--check  - like verify, but stop on verification errors [False]\n");
         printf("\t\t-i/--ignore_errors  - do not stop on errors, just count them [False]\n");
@@ -3519,17 +3563,31 @@ void usage(void)
  */
 void *stats_main(void* arg)
 {
-        while (!started) {
+        int warmup = conf.warmup_sec;
+        struct timespec duration = {0}, remaining;
+        
+        while (!state_reached(WARMINGUP)) {
                 usleep(100 * 1000);
         }
 
+        DEBUG("warming up starting");
 	enable_signals();
 
+        while (warmup-- > 0) {
+                duration.tv_sec = 1;
+                duration.tv_nsec = 0;
+                DEBUG2("warming up %d seconds left", warmup+1);
+		while (nanosleep(&duration, &remaining) < 0)
+			duration = remaining;
+        }
+        DEBUG("warming up done");
+        state_set(RUNNING, 0);
+        
 	realtime_reports(conf.secs);
 
 	disable_signals();
 
-        finished = 1;
+        state_set(FINISHED, 0);
 
         return NULL; 
 }
@@ -3539,7 +3597,7 @@ void *stats_main(void* arg)
  */
 void *timeout_check_main(void* arg)
 {
-        while (!started) {
+        while (!state_reached(WARMINGUP)) {
                 usleep(100 * 1000);
         }
 
@@ -3599,7 +3657,7 @@ void *async_main(void* unused)
 
 	start(total_nthreads);
 
-        while (!finished) {
+        while (!state_reached(FINISHED)) {
                 th_busywait();
         }
 
@@ -3651,7 +3709,7 @@ void *sync_main(void * unused)
 
         start(total_nthreads);
 
-        while (!finished)
+        while (!state_reached(FINISHED))
                 th_busywait();
 
 	doexit();
@@ -4023,7 +4081,6 @@ int main(int argc, char **argv)
 	int i, j, opt;
         
         model = IO_MODEL_SYNC; /* default */
-        stall = 0;
 
         for (wl = workloads; wl < workloads + MAX_WORKLOADS; wl++)
                 init_workload(wl);
@@ -4043,7 +4100,7 @@ int main(int argc, char **argv)
 
         optind = 0;
         /* allow extensions to add options */
-        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:ziegZ:B:",
+        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:ziegZ:B:u:",
                                    btest_long_options, &unified_long_options);
 
 	while ((opt = getopt_long(argc, argv, optstr, unified_long_options, NULL)) != -1) {
@@ -4244,6 +4301,12 @@ int main(int argc, char **argv)
                         ndebuglines = strtoul(optarg, 0, 0);
                         printf("Use %u debug lines\n", ndebuglines);
                         break;
+                case 'u':
+                        check_mode("warmup (-u)", -1, 0);
+                        conf.warmup_sec = atoi(optarg);
+                        if (conf.warmup_sec > 0)
+                                printf("Warmup for %d seconds\n", conf.warmup_sec);
+                        break;
 		}
 	}
 
@@ -4302,7 +4365,7 @@ int main(int argc, char **argv)
         for (i = 0; i < conf.nfiles; i++)
                 filenames[i] = strdup(argv[optind + i]);
 
-        finished = started = 0;
+        state_set(STARTING, 0);
 
         if (pthread_create(&thid, NULL, (void *(*)(void *))stats_main, NULL))
                 PANIC("Stats main thread creation failed");

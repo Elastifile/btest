@@ -57,6 +57,7 @@ typedef struct BtestConf {
         int diff_interval;
         int subtotal_interval;
         int timeout_ms;                 /**< timeout value in msec and also interval to check for timedout IOs */
+        int warmup_sec;
         int rseed;
         uint64 num_op_limit;            /**< requested op limit */
         int exit_eof;
