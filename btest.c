@@ -1755,7 +1755,11 @@ int start(int n)
 	time(&t);
 	printf("%d threads are ready, starting test at %s", n, ctime(&t));
 	shared.cond_broadcast_func(n);
-        state_set(WARMINGUP, 0);
+        if (conf.warmup_sec)
+                state_set(WARMINGUP, 0);
+        else
+                state_set(RUNNING, 1);
+                
 	return 0;
 }
 
@@ -2554,7 +2558,8 @@ int do_io(worker_ctx *worker)
                         return 1;
                 }
                 atomic_fetch_and_inc64(&total_ops);
-        }
+        } else
+                DEBUG3("Ignoring IO during warmup");
         
         if (conf.exit_eof && eof_reached(worker))
                 return 1;
@@ -3572,18 +3577,20 @@ void *stats_main(void* arg)
                 usleep(100 * 1000);
         }
 
-        DEBUG("warming up starting");
 	enable_signals();
 
-        while (warmup-- > 0) {
-                duration.tv_sec = 1;
-                duration.tv_nsec = 0;
-                DEBUG2("warming up %d seconds left", warmup+1);
-		while (nanosleep(&duration, &remaining) < 0)
-			duration = remaining;
+        if (warmup) {
+                DEBUG("warming up starting");
+                while (warmup-- > 0) {
+                        duration.tv_sec = 1;
+                        duration.tv_nsec = 0;
+                        DEBUG2("warming up %d seconds left", warmup+1);
+                        while (nanosleep(&duration, &remaining) < 0)
+                                duration = remaining;
+                }
+                DEBUG("warming up done");
+                state_set(RUNNING, 0);
         }
-        DEBUG("warming up done");
-        state_set(RUNNING, 0);
         
 	realtime_reports(conf.secs);
 
