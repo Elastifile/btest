@@ -2378,6 +2378,9 @@ uint64 find_next_validation_offset(worker_ctx *worker)
         workload *wl = worker->wlctx->wl;
         uint64 offset = worker->offset;
 
+        if (offset == ~0ul)
+                return offset;
+
         for (;;) {
                 if (offset + wl->blocksize > worker->wlctx->end)
                         return ~0ul;
