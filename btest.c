@@ -2372,38 +2372,16 @@ int eof_reached(worker_ctx *worker)
         return 0;
 }
 
-uint64 find_next_validation_offset(worker_ctx *worker)
-{
-        file_ctx *fctx = worker->fctx;
-        workload *wl = worker->wlctx->wl;
-        uint64 offset = worker->offset;
-
-        if (offset == ~0ul)
-                return offset;
-
-        for (;;) {
-                if (offset + wl->blocksize > worker->wlctx->end)
-                        return ~0ul;
-
-                if (has_stamp(fctx, offset))
-                        break;
-
-                /* skip (block * threads) on this file to keep in sync with other threads */
-                offset += wl->blocksize * conf.nthreads;
-
-        };
-       return offset;        /* validation not finished */
-}
-
 uint64 next_validation_offset(worker_ctx *worker)
 {
         file_ctx *fctx = worker->fctx;
         workload *wl = worker->wlctx->wl;
-        uint64 offset = worker->offset;
+        uint64 offset = worker->fctx->seq_offset;
 
-        for (;;) {
+        
+        for (;offset != ~0ul;) {
                 /* skip (block * threads) on this file to keep in sync with other threads */
-                offset += wl->blocksize * conf.nthreads;
+                offset += wl->blocksize;
 
                 if (offset + wl->blocksize > worker->wlctx->end)
                         return ~0ul;
@@ -2426,10 +2404,15 @@ uint64 seq_offset(worker_ctx *worker)
  * Set next sequential offset for this worker
  */
 uint64 next_seq_offset(worker_ctx *worker)
-{
-        if (conf.verification_mode)
-                return next_validation_offset(worker);
-        else {
+{        
+        if (conf.verification_mode) {
+                uint64 next, old;
+                do {
+                        old = worker->fctx->seq_offset;
+                        next = next_validation_offset(worker);
+                } while (next != ~0ul && !__sync_bool_compare_and_swap(&worker->fctx->seq_offset, old, next));
+                return next;
+        } else {
                 DEBUG3("file %s: seq offset 0x%lx", worker->fctx->file, worker->fctx->seq_offset);
         	return atomic_fetch_and_add64(&worker->fctx->seq_offset, worker->wlctx->wl->blocksize);
         }
@@ -3327,8 +3310,8 @@ end:
                         worker_summary(worker, &subtotal);
                 }
         }
-        subtotal.lat = comp_lat(&subtotal);
 	subtotal.duration /= conf.aio_window_size;
+        subtotal.lat = comp_lat(&subtotal);
         update_shared_stats(&subtotal);
 
 
@@ -3384,7 +3367,6 @@ void* sync_thread(io_thread_ctx *io_thread)
         worker->wlctx = next_workload_ctx(worker);
         worker->offset = next_seq_offset(worker);
         if (conf.verification_mode) {
-                worker->offset = find_next_validation_offset(worker);
                 DEBUG("io thread %d file %s set offset to %lu", io_thread->num, worker->fctx->file, worker->offset);
         }
         
