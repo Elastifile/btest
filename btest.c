@@ -263,7 +263,6 @@ struct shared {
 
 	int started;
         int finished; 
-	IOStats total;
 
         btest_extension ext;
 
@@ -1436,7 +1435,7 @@ uint64 saferandom64(struct drand48_data * buffer)
 /**
  * Print out summary reports
  */
-void summary(char *title, IOStats * stats)
+void summary(char *title, IOStats * stats, int n)
 {
         char verr[32] = "";
         uint i;
@@ -1444,14 +1443,18 @@ void summary(char *title, IOStats * stats)
         if (conf.verify)
         	snprintf(verr, sizeof verr, ", verification errors %" PRIu64, stats->verify_errors);
 
-	printf("%s: %.3f seconds, %.3f iops, avg latency %"
-	       PRIu64 " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s\n",
-               title, stats->duration * 1.0 / (double) 1000000.0, comp_iops(stats), stats->lat,
-	       comp_bw(stats), stats->errors, verr);
+        printf("%s: %.3f seconds, %.3f iops, avg latency %"
+	       PRIu64 " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s, total ops %lu\n",
+               title,
+               ((double)stats->duration) / ((double)1000000.0) / n,
+               comp_iops(stats) * n,
+               comp_lat(stats),
+	       comp_bw(stats) * n,
+               stats->errors,verr, stats->ops);
         /* latency histograms are not supported in async mode */
         printf("%s: %.3f seconds, %u max_latency, hiccups levels:",
                title,
-               stats->duration * 1.0 / (double) 1000000.0,
+               ((double)stats->duration) / ((double)1000000.0) / n,
                stats->max_duration);
         for (i = 0; i < HICCUP_LEVEL_NUM_OF; i++)
                 printf(" %s: %u", hickup_level_strings[i], stats->hickup_histogram[i]);
@@ -1708,30 +1711,16 @@ void dostats_diff(int sig)
 }
 
 /**
- * Update the global shared statistics used for the final reports.
+ * Update the global test state.
  * 
  * @note takes the shared global lock to provide thread safeness.
  */
-void update_shared_stats(IOStats *stats)
+void thread_finished(void)
 {
-        uint i;
-        
-        shared.lock_func();
-        
+        shared.lock_func();        
         shared.finished++;
         if (shared.finished >= shared.started)
-                state_set(FINISHED, 0);
-        shared.total.errors += stats->errors;
-        shared.total.verify_errors += stats->verify_errors;
-        shared.total.ops += stats->ops;
-        shared.total.duration += stats->duration;
-        shared.total.bytes += stats->bytes;
-        shared.total.lat += stats->lat;
-        for (i = 0; i < HICCUP_LEVEL_NUM_OF; i++)
-                shared.total.hickup_histogram[i] += stats->hickup_histogram[i];
-        if (stats->max_duration > shared.total.max_duration)
-                shared.total.max_duration = stats->max_duration;
-        
+                state_set(FINISHED, 0);        
         shared.unlock_func();
 }
 
@@ -1784,7 +1773,6 @@ void flush()
 		clock_gettime(CLOCK_REALTIME, &t2);
 		stats->sduration =
 		    (t2.tv_sec - t1.tv_sec) * 1000000llu + (t2.tv_nsec - t1.tv_nsec) / 1000.0;
-		shared.total.sduration += stats->sduration;
 	}
 }
 
@@ -1802,8 +1790,6 @@ int finish(int n)
 	}
 	shared.unlock_func();
 
-	shared.total.duration /= n * devs_per_thread;
-	shared.total.lat /= n * devs_per_thread;
 	return 0;
 }
 
@@ -1822,23 +1808,37 @@ void exit_signal(int sig)
  */
 void doexit()
 {
+	IOStats total = { 0 };
 	time_t t;
+	int n = 0;
 
 	signal(SIGUSR1, SIG_IGN);
 	signal(SIGUSR2, SIG_IGN);
 	finish(shared.started);
-	summary("Total", &shared.total);
+        
+	worker_ctx *worker, *e;
+
+	for (worker = workers, e = worker + total_nworkers; worker < e; worker++) {
+                worker_summary(worker, &total);
+                n++;
+        }
+        
+	summary("Total", &total, n);
+        
 	if (conf.write_behind > 0) {
 		flush();
-		shared.total.duration += shared.total.sduration;
-		shared.total.lat = shared.total.duration / shared.total.ops;
-		summary("Synced", &shared.total);
+                
+                for (n = 0, worker = workers, e = worker + total_nworkers; worker < e; worker++) {
+                        worker_summary(worker, &total);
+                        n++;
+                }
+		summary("Synced", &total, n);
 	}
         if (conf.block_md_base)
                 md_flush();
         if (alloc_block_spinning)
                 DEBUG("alloc block spinning %lu ops %lu avg per op: %.2f",
-                        alloc_block_spinning, shared.total.ops, (double)alloc_block_spinning / (double)shared.total.ops);
+                        alloc_block_spinning, total_ops, (double)alloc_block_spinning / (double)total_ops);
 
         dump_debug_line("/tmp/debuglines");
 
@@ -3173,7 +3173,6 @@ void *aio_thread(aio_thread_ctx *athread)
         worker_ctx *worker;
         int aiores, initializer = 0;
         int inflight_ios_count = 0;
-        IOStats subtotal = {0};
         int r, f, i;
 
         DEBUG("initializing...");
@@ -3301,19 +3300,7 @@ void *aio_thread(aio_thread_ctx *athread)
         }
 
 end:
-        /* update/sum stats */
-        for (f = 0; f < total_nfiles; f++) {
-                
-                for (i = 0; i < conf.aio_window_size; i++) {
-                        worker = myworkers[f][i];
-
-                        worker_summary(worker, &subtotal);
-                }
-        }
-	subtotal.duration /= conf.aio_window_size;
-        subtotal.lat = comp_lat(&subtotal);
-        update_shared_stats(&subtotal);
-
+        thread_finished();
 
 	return 0;
 }
@@ -3336,7 +3323,6 @@ end:
 void* sync_thread(io_thread_ctx *io_thread)
 {
         worker_ctx *worker = new_worker(io_thread->fctx);
-	IOStats *stats = &worker->stats;
         int initializer = 0;
         int r;
         
@@ -3383,13 +3369,8 @@ void* sync_thread(io_thread_ctx *io_thread)
 
         DEBUG("worker done");
         
-        stats->lat = comp_lat(stats);
-
-        worker_summary(worker, 0);
-
-        update_shared_stats(stats);
-
-	return 0;
+        thread_finished();
+        return 0;
 }
 
 /**********************************************************************************************************************
