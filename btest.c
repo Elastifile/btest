@@ -136,7 +136,7 @@
 #include "btest_data_struct.h"
 #include "sg_read.h"
 
-#define BTEST_VERSION 141
+#define BTEST_VERSION 150
 #define xstr(s) str(s)
 #define str(s) #s
 #define BTEST_COMMIT xstr(COMMIT)

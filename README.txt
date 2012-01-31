@@ -1,3 +1,9 @@
+120131 - Version 150:
+	- add warmup, update doc
+	- fix timeout check
+	- fix total stats
+	- cleanup states
+
 111123 - Version 141:
 	- add timeout check, update doc
 
