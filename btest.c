@@ -2399,7 +2399,7 @@ uint64 seq_offset(worker_ctx *worker)
 {
        return worker->wlctx->start + ((worker->offset - worker->wlctx->start) % worker->wlctx->len);
 }
-
+        
 /**
  * Set next sequential offset for this worker
  */
@@ -3430,7 +3430,7 @@ void usage(void)
                 "-Z <comression_rate> -B <timeout_ms> -u <warmup_sec> -P <stampsz> -O -m <md_file_base> -v -c "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <S|R|rand-ratio> <R|W|read-ratio> <dev/file> ...\n", prog);
 	printf("\nWorkload file mode:\n       %s [-hdV -W -D -f <workloads filename> -t <sec> "
-             "-T <threads> -S <seed> -w <window-size> -m <md_file_base> -v -c "
+             "-T <threads> -S <seed> -w <window-size> -m <md_file_base> -v -c  -B <timeout_ms> -u <warmup_sec> "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <dev/file> ...\n", prog);
 	printf("\nVerification mode:\n       %s [-hdV -D -C <md_base> -b <blksz> -a <alignsize> "
                 "-o <start> -l <length> -S <seed> "
@@ -3450,6 +3450,8 @@ void usage(void)
 	printf("\t\t-b/--block_size <IO Block size> [%d]\n", conf.def_blocksize);
 	printf("\t\t-a/--alignment_size <IO alignment size> [by default same as block size]\n");
 	printf("\t\t-t/--duration <sec> - limit test duration in seconds, 0 for infinity [%d]\n", conf.secs);
+        printf("\t\t-u/--warmup <sec> - run workload for the specified seconds period before starting test "
+                "[default %d msec]\n", conf.warmup_sec);
 	printf("\t\t-n/--num_ops <ops number>  - limit the test's total number of IO operations 0 for infinity "
                 "[%d]\n", DEFAULT_TIME_LIMIT);
 	printf("\t\t-e/--exit_eof  - exit on EOF (make sense for sequential IO) [%d]\n", conf.exit_eof);
@@ -3481,8 +3483,6 @@ void usage(void)
         printf("\t\t-A/--activity_check  - exit if there were no successful I/Os in the last interval \n");
         printf("\t\t-B/--timeout_ms  -  break if an IO duration exceeds that specified msec value. "
                 "Set to 0 to disable check [default %d msec]\n", conf.timeout_ms);
-        printf("\t\t-u/--warmup <sec> - run workload for the specified seconds period before starting test "
-                "[default %d msec]\n", conf.warmup_sec);
         printf("\t\t-v/--verify  - verify stamps after each read (see options -p, -P and -O [False]\n");
         printf("\t\t-c/--check  - like verify, but stop on verification errors [False]\n");
         printf("\t\t-i/--ignore_errors  - do not stop on errors, just count them [False]\n");
@@ -4309,6 +4309,7 @@ int main(int argc, char **argv)
                 wl->readratio = 100;
                 model = IO_MODEL_SYNC;
                 conf.subtotal_interval = 0;
+                conf.warmup_sec = 0;
                 total_nworkloads = 1;
 
                 verify_sizes(wl);
