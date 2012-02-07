@@ -228,13 +228,6 @@ struct file_ctx {
         uint64 seq_offset;          /**< for seq workloads - shared among workloads */
 };
 
-typedef enum IOModel {
-        IO_MODEL_INVALID = 0,
-        IO_MODEL_SYNC,
-        IO_MODEL_ASYNC,
-} IOModel;
-
-
 #ifdef	__cplusplus
 }
 #endif

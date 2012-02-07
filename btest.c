@@ -164,20 +164,23 @@ BtestConf conf = {
 
         .preformat = 0,                 /** by default no preformating is done */
         .pretrim = 0,                   /** by default no pre-trimming is done */
-        .sg_mode = -1,                  /** by default sg mode is not used. Will be set automatically 
-                                            if dev match /dev/sg* */
-        .write_behind = 0,              /** by default write behind mode is not set (== sync) */
+
         .report_workers = 0,            /** by default per worker reports are not producted */
         .activity_check = 0,            /** by default activity check is not performed */
         .verify = 0,                    /** by default data is not verified */
         .verification_mode = 0,         /** by default verification mode is off */
         .ignore_errors = 0,             /** by default errors are not ignored, and the first one lead to panic */
         .debug = 0,                     /** by default debug level is 0 (none) */
+        
+        .csv_report = 0,                /** by default no CSV report are produced */
+        .iomodel = IO_MODEL_INVALID,    /** by default SYNC IO is used */
 };
 
 
 /* globals */
 char *prog;
+
+FILE *csv_file;
 
 char            *filenames[MAX_FILES];
 workload        workloads[MAX_WORKLOADS];
@@ -214,8 +217,6 @@ void(*th_busywait)();
 /**
  * Global variables for Sync + Async
  */ 
-int openflags_block = O_CREAT | O_LARGEFILE | O_NOATIME | O_SYNC;
-
 #define FORMAT_IOSZ (1 << 20)
 #define TRIM_FORMAT_IOSZ (10 << 20)
 char formatbuf[FORMAT_IOSZ];
@@ -227,11 +228,6 @@ char formatbuf[FORMAT_IOSZ];
  */
 io_context_t* aio_ctxt_array = NULL;
 
-/**
- * Global variables for SCSI
- */
-int openflags_sg = O_RDWR;
-
 static char* hickup_level_strings[HICCUP_LEVEL_NUM_OF] =
 {
         [HICKUP_LEVEL_0_MILLI] "<1ms",
@@ -241,6 +237,27 @@ static char* hickup_level_strings[HICCUP_LEVEL_NUM_OF] =
         [HICKUP_LEVEL_101ANDUP_MILLI] ">100ms"
 };
 
+char *iomodel_str[] = {
+        [IO_MODEL_INVALID] "???",
+        [IO_MODEL_SYNC] "sync",
+        [IO_MODEL_ASYNC] "async",
+        [IO_MODEL_SGIO] "sgio",
+        [IO_MODEL_SGIO_DIRECT] "sgio_direct",
+        [IO_MODEL_WRITE_BEHIND] "writebehind",
+        [IO_MODEL_DIRECT] "direct",    
+        [IO_MODEL_DIRECT_SYNC] "direct_sync",    
+};
+
+int openflags_iomodel[] = {
+        [IO_MODEL_INVALID] 0,
+        [IO_MODEL_SYNC] O_CREAT | O_LARGEFILE | O_NOATIME | O_SYNC,
+        [IO_MODEL_ASYNC] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT,
+        [IO_MODEL_SGIO] O_RDWR | O_DIRECT,
+        [IO_MODEL_SGIO_DIRECT] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT | O_SYNC,      
+        [IO_MODEL_WRITE_BEHIND] O_CREAT | O_LARGEFILE | O_NOATIME,
+        [IO_MODEL_DIRECT] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT,      
+        [IO_MODEL_DIRECT_SYNC] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT | O_SYNC,      
+};
 /**
  * Global shared functions and flags
  */
@@ -1496,6 +1513,22 @@ char *readratio_str(int ratio, char *buf)
 }
 
 /**
+ * Print out CSV headers to file
+ */
+void csv_headers(void)
+{
+        int i;
+        
+        if (!csv_file)
+                return;
+        
+        fprintf(csv_file, "\"Title\",\"# workers\",\"seconds\",\"total seconds\",\"avg iops\",\"avg latency usec \","
+                "\"bandwidth (KB/s)\",\"# errors\",\"# verification errors\",\"ops\"");
+        for (i = 0; i < HICCUP_LEVEL_NUM_OF; i++)
+                        fprintf(csv_file, ",\"%s\"", hickup_level_strings[i]);
+        fprintf(csv_file, "\n");
+}
+/**
  * Print out subtotal reports
  * @param stats the aggregated statistics
  * @param title string to print on the start of the line (header part)
@@ -1505,29 +1538,44 @@ char *readratio_str(int ratio, char *buf)
  */
 void worker_subtotal(IOStats * stats, char *title, int n)
 {
-        char verr[32] = "";
+        char verr[32] = "0";
         uint i;
 
         if (conf.verify)
         	snprintf(verr, sizeof verr, ", verification errors %" PRIu64, stats->verify_errors);
 
-	printf("%s: %d workers, %.3f seconds (%.3f), %.3f"
-	       " iops, avg latency %" PRIu64 " usec, bandwidth %" PRIu64
-	       " KB/s, errors %" PRIu64 "%s, ops %lu\n",
-	       title, n,
-	       ((double)stats->duration) / ((double)1000000.0) / n,
-	       ((double)stats->sduration) / ((double)1000000.0),
-	       comp_iops(stats) * n, comp_lat(stats), comp_bw(stats) * n, stats->errors, verr, stats->ops);
-
-        /* latency histograms are not supported in async mode */
-        printf("%s: %d workers, %.3f seconds (%.3f), %u max_latency, hiccups levels:",
-               title, n,
-               ((double)stats->duration) / ((double) 1000000.0) / n,
-               ((double)stats->sduration) / ((double)1000000.0),
-               stats->max_duration);
-        for (i = 0; i < HICCUP_LEVEL_NUM_OF; i++)
-                printf(" %s: %u", hickup_level_strings[i], stats->hickup_histogram[i]);
-        printf("\n");
+        if (csv_file)
+                fprintf(csv_file, "\"%s\",%d,%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64",%" PRIu64 ",%s,%"PRIu64,
+                        title, n,
+                        ((double)stats->duration) / ((double)1000000.0) / n,
+                        ((double)stats->sduration) / ((double)1000000.0),
+                        comp_iops(stats) * n, comp_lat(stats), comp_bw(stats) * n, stats->errors, verr, stats->ops);
+        else
+                printf("%s: %d workers, %.3f seconds (%.3f), %.3f"
+                        " iops, avg latency %" PRIu64 " usec, bandwidth %" PRIu64
+                        " KB/s, errors %" PRIu64 "%s, ops %lu\n",
+                        title, n,
+                        ((double)stats->duration) / ((double)1000000.0) / n,
+                        ((double)stats->sduration) / ((double)1000000.0),
+                        comp_iops(stats) * n, comp_lat(stats), comp_bw(stats) * n, stats->errors, verr, stats->ops);
+        
+        if (!csv_file)
+                printf("%s: %d workers, %.3f seconds (%.3f), %u max_latency, hiccups levels:",
+                        title, n,
+                        ((double)stats->duration) / ((double) 1000000.0) / n,
+                        ((double)stats->sduration) / ((double)1000000.0),
+                        stats->max_duration);
+        
+        for (i = 0; i < HICCUP_LEVEL_NUM_OF; i++) {
+                if (csv_file)
+                        fprintf(csv_file, ",%u", stats->hickup_histogram[i]);
+                else
+                        printf(" %s: %u", hickup_level_strings[i], stats->hickup_histogram[i]);
+        }
+        if (csv_file)
+                fprintf(csv_file, "\n");
+        else
+                printf("\n");
 }
 
 /**
@@ -1824,8 +1872,10 @@ void doexit()
         }
         
 	summary("Total", &total, n);
+        if (csv_file)
+                worker_subtotal(&total, "Summary", n);
         
-	if (conf.write_behind > 0) {
+	if (conf.iomodel == IO_MODEL_WRITE_BEHIND) {
 		flush();
                 
                 for (n = 0, worker = workers, e = worker + total_nworkers; worker < e; worker++) {
@@ -1833,7 +1883,15 @@ void doexit()
                         n++;
                 }
 		summary("Synced", &total, n);
+                if (csv_file)
+                        worker_subtotal(&total, "Synced", n);
 	}
+
+        if (csv_file) {
+                fflush(csv_file);
+                fclose(csv_file);
+        }
+
         if (conf.block_md_base)
                 md_flush();
         if (alloc_block_spinning)
@@ -1844,7 +1902,7 @@ void doexit()
 
 	time(&t);
 	printf("Test is done at %s", ctime(&t));
-
+        
         exit(0);
 }
 
@@ -1896,7 +1954,9 @@ static void realtime_reports(int left)
 	int ratio = 0, diffs = 0;
 	int tick;
 
-	if (conf.diff_interval > 0 && conf.diff_interval < left) {
+        csv_headers();
+        
+        if (conf.diff_interval > 0 && conf.diff_interval < left) {
 		tick = conf.diff_interval;
 		ratio = conf.subtotal_interval / conf.diff_interval;
 	} else if (conf.subtotal_interval > 0 && conf.subtotal_interval < left) {
@@ -2243,11 +2303,8 @@ void do_format(file_ctx *ctx, char *file, uint64_t start, uint64_t size)
 	int ios = 0;
 	int iosize;
 	int fd;
-	int is_sg;
 
-	is_sg = sg_is_sg(file);
-
-	fd = open(file, O_RDWR | O_CREAT | O_LARGEFILE | O_NOATIME, 0600);
+        fd = open(file, O_RDWR | O_CREAT | O_LARGEFILE | O_NOATIME, 0600);
         if (fd < 0 && shared.ext.open_failure)
                 fd = shared.ext.open_failure(file, O_RDWR | O_CREAT | O_LARGEFILE | O_NOATIME, 0600);
         if (fd < 0)
@@ -2260,17 +2317,13 @@ void do_format(file_ctx *ctx, char *file, uint64_t start, uint64_t size)
 		if (iosize > size)
 			iosize = size;
 		DEBUG2("format IO: %s offs %" PRId64 " iosize %d", file, start, iosize);
-                if (is_sg) {
-                        if (sg_write(NULL, fd, formatbuf, iosize, start) != iosize) 
+                if (shared.write(NULL, fd, formatbuf, iosize, start) != iosize) 
                                 PANIC("io failed on %s during format offset %" PRId64, file, start);
-                } else {
-                        if (sync_write(NULL, fd, formatbuf, iosize, start) != iosize)
-                                PANIC("io failed on %s during format offset %" PRId64, file, start);
-                }
 		size -= iosize;
 		start += iosize;
 		ios++;
-		if (!(ios % (1 << 10))){
+                /* pretty print '.' every 1k IOs */
+		if (!(ios % (1 << 10))) {
 			printf(".");
 			fflush(stdout);
 		}
@@ -2897,42 +2950,40 @@ file_ctx *new_file_ctx(void)
         ctx->file = filenames[ctx->num];
         shared.unlock_func();
         
-        openflags_block |= (readonly) ? O_RDONLY : O_RDWR;
 
         ctx->type = file_get_type(ctx->file);
         is_sg = ctx->type == F_SG;
 
-        if (conf.sg_mode < 0)
-                conf.sg_mode = is_sg;
-        else if (conf.sg_mode ^ is_sg)
-                PANIC("can't mix SG deviecs and non SG devices (found %s sg %d conf.sg_mode %d)", ctx->file, conf.sg_mode, is_sg);
+        if (is_sg) {    /* automatically switch to SGIO model if SG device is discovered */
+                if (conf.iomodel != IO_MODEL_SGIO && (conf.iomodel != IO_MODEL_SYNC && ctx->num > 0))
+                        PANIC("can't mix SG devices and non SG devices (found %s sg %d)", ctx->file, is_sg);
+                if (conf.iomodel != IO_MODEL_SGIO) {
+                        conf.iomodel = IO_MODEL_SGIO;
+                        shared.read = sg_read;
+                        shared.write = sg_write;
+                        printf("Switch to SGIO mode\n");
+                }
+        } else if (ctx->type == F_FILE && conf.iomodel == IO_MODEL_SGIO)
+                PANIC("can't use SGIO on file '%s'", ctx->file);
 
-        openflags = is_sg ? openflags_sg : openflags_block;
-        openflags = openflags_block;
+        openflags = openflags_iomodel[conf.iomodel];
+        openflags |= (readonly) ? O_RDONLY : O_RDWR;
         
-        DEBUG("file '%s' open flags: (octal) %o", ctx->file, openflags);
+        DEBUG("file '%s' IOModel: %s open flags: (octal) %o", ctx->file, iomodel_str[conf.iomodel], openflags);
 	fd = open(ctx->file, openflags, 0600);
 
-
-        /* If open was successful, do one I/O to make sure we device is active */
-        if (fd >= 0) {
+        /* If open was successful, do one READ op to make sure we device is active */
+        /* file type files should not be checked now, they can be zero sized */
+        if (fd >= 0 && ctx->type != F_FILE) {
                 char* buf = valloc(iosize);
-                if (is_sg) {
-                        if (sg_read(NULL, fd, buf, iosize, startoffset) < 0) {
-                                close(fd);
-                                fd = -1; 
-                        }
-                                
-                } else if (ctx->type == F_BLOCK) {
-                        if (sync_read(NULL, fd, buf, iosize, startoffset) < 0) {
-                                close(fd);
-                                fd = -1; 
-                        }
+                if (shared.read(NULL, fd, buf, iosize, startoffset) < 0) {
+                        close(fd);
+                        fd = -1; 
                 }
-                /* file type files should not be checked now, they can be zero sized */
-                free(buf);
+                free(buf);                        
         }
 
+        /* if open failed, let extentions try to recover */
         if (fd < 0 && shared.ext.open_failure)
                 fd = shared.ext.open_failure(ctx->file, openflags, openflags);
 
@@ -3176,8 +3227,8 @@ void *aio_thread(aio_thread_ctx *athread)
         int r, f, i;
 
         DEBUG("initializing...");
-        if (conf.aio_window_size == 0)
-                PANIC("AsyncIO completion thread started and window size is 0");
+        if (conf.iomodel != IO_MODEL_ASYNC || conf.aio_window_size == 0)
+                PANIC("AsyncIO completion thread started but model is wrong or window size is 0");
 
         for (f = 0; f < total_nfiles; f++) {
                 for (i = 0; i < conf.aio_window_size; i++) {
@@ -3390,6 +3441,7 @@ static struct option btest_long_options[] = {
         {"length", 1, 0, 'l'},
         {"seed", 1, 0, 'S'},
         {"async_io", 1, 0, 'w'},
+        {"sgio", 0, 0, 'G'},
         {"stampblock", 1, 0, 'P'},
         {"dedup", 1, 0, 'p'},
         {"compression", 1, 0, 'Z'},
@@ -3420,16 +3472,19 @@ static struct option btest_long_options[] = {
         {"debug", 0, 0, 'd'},
         {"debuglines", 0, 0, 'L'},
         
+        {"iomode", 1, 0, 0},
+        {"csv", 1, 0, 0},
+        
         {0, 0, 0, 0}
 };
 
 void usage(void)
 {
-	printf("Usage: %s [-hdV -W -D -b <blksz> -a <alignsize> -t <sec> "
+	printf("Usage: %s [-hdV -W -D -G -b <blksz> -a <alignsize> -t <sec> "
              "-T <threads> -o <start> -l <length> -S <seed> -w <window-size> -p <dedup_likelihood> "
                 "-Z <comression_rate> -B <timeout_ms> -u <warmup_sec> -P <stampsz> -O -m <md_file_base> -v -c "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <S|R|rand-ratio> <R|W|read-ratio> <dev/file> ...\n", prog);
-	printf("\nWorkload file mode:\n       %s [-hdV -W -D -f <workloads filename> -t <sec> "
+	printf("\nWorkload file mode:\n       %s [-hdV -W -D -G -f <workloads filename> -t <sec> "
              "-T <threads> -S <seed> -w <window-size> -m <md_file_base> -v -c  -B <timeout_ms> -u <warmup_sec> "
                 "-n <num_ops_limit> -r <sec> -R <sec>] <dev/file> ...\n", prog);
 	printf("\nVerification mode:\n       %s [-hdV -D -C <md_base> -b <blksz> -a <alignsize> "
@@ -3437,7 +3492,9 @@ void usage(void)
                 "-p <dedup_ratio> -P <stampsz> -O -v -r <sec> -R <sec>] <dev/file> ...\n", prog);
         printf("\n\tOperation Modes:\n");
         printf("\t\t: Sync/Async - If -w/--write_behind is specified async is enabled, if not sync is used.\n");
-        printf("\t\t: SCSI Genetic mode - used if device starts with /dev/sg.\n");
+        printf("\t\t: Direct IO - forced by a single -D flag. the second -D flag force SYNC+DIRECT IO.\n");
+        printf("\t\t: SCSI Genetic mode - used if device starts with /dev/sg or if -G/--sgio option is used. "
+                "Second -G will force direct SG IO\n");
         printf("\t\t: Verification mode: -C/--check_scan  - sequentially scan the file and verify its data stamps "
                 "according to specified md file. The default behavior is to stop on first error. "
                 "This can be changed using "
@@ -3463,6 +3520,7 @@ void usage(void)
         printf("\t\t-w/--async_io <window size> - AsyncIO set window size in blocks per file per "
                 "worker thread. The total number of "
                 "inflight IOs is #threads*#files*window_size. > [0]\n");
+        printf("\t\t--iomode=<sync,direct,async,writebehind,sgio> select IO mode [sync]\n");
         printf("\t\t-P/--stampblock <size > - size of block to use when stamping writes. "
                 "Stamp is the dedup/write stamp (see -p) and/or offset stamp (see -O). Size 0 disables data stamping"
                 " [the default size is smallest of block size or 4k (see -b)]\n");
@@ -3598,6 +3656,9 @@ void *async_main(void* unused)
         int i, t;
         
         DEBUG("using random seed %d", conf.rseed);
+
+        if (conf.iomodel != IO_MODEL_ASYNC || conf.aio_window_size == 0)
+                PANIC("AsyncIO completion thread started but model is wrong or window size is 0");
 
         shared.init_func();
 
@@ -4048,15 +4109,12 @@ void check_mode(char *option, int cmdline, int verification)
 int main(int argc, char **argv)
 {
         struct option *unified_long_options;
-        IOModel model = IO_MODEL_INVALID;
         struct drand48_data rbuf;
         pthread_t thid = 0;
         workload *wl;
         char *optstr;
-	int i, j, opt;
+	int i, j, opt, option_index;
         
-        model = IO_MODEL_SYNC; /* default */
-
         for (wl = workloads; wl < workloads + MAX_WORKLOADS; wl++)
                 init_workload(wl);
 
@@ -4075,17 +4133,46 @@ int main(int argc, char **argv)
 
         optind = 0;
         /* allow extensions to add options */
-        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:ziegZ:B:u:",
+        optstr = btest_ext_opt_str("+hVdf:t:T:b:s:o:l:H:S:w:DAWP:p:r:R:FXx:a:m:vcn:OL:C:ziegZ:B:u:G",
                                    btest_long_options, &unified_long_options);
 
-	while ((opt = getopt_long(argc, argv, optstr, unified_long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, optstr, unified_long_options, &option_index)) != -1) {
 
                 /* let extensions to control their options (or take control over default options) */
                 opt = btest_ext_get_opt(opt, optarg, &shared.ext);
                 
 		switch (opt) {
 		default:
-                case '\0': /* handled by extension */
+                case '\1': /* handled by extension */
+                        break;
+                case '\0':
+                        /* long option only */
+                        if (strncmp(unified_long_options[option_index].name, "csv", 4) == 0) {
+                                conf.csv_report = optarg;
+                                printf("Produce CSV report to file %s\n", optarg);
+                                if (!strncmp(optarg, "-", 2))
+                                        csv_file = stdout;
+                                else if ((csv_file = fopen(optarg, "w")) == NULL)
+                                        PANIC("Can't open/create csv file %s: %m", optarg);
+                                /* make csv file line buffered */
+                                setlinebuf(csv_file);
+                        } else if (strncmp(unified_long_options[option_index].name, "iomode", 7) == 0) {
+                                char **s;
+                                for (s = iomodel_str; s < iomodel_str + IO_MODEL_LAST; s++) {
+                                        if (strncmp(*s, optarg, strlen(*s)+1) == 0)
+                                                break;
+                                }
+                                if (s - iomodel_str >= IO_MODEL_LAST)
+                                        PANIC("unknown io model '%s'", optarg);
+                                conf.iomodel = s - iomodel_str;
+                                printf("IOModel is %s\n", optarg);
+                        } else {
+                                fprintf(stderr, "Error: unknown option %s", unified_long_options[option_index].name);
+                                if (optarg)
+                                        fprintf(stderr, " with arg %s", optarg);
+                                fprintf(stderr, "\n");
+                                usage();
+                        }
                         break;
 		case 'h':
 			usage();
@@ -4138,17 +4225,14 @@ int main(int argc, char **argv)
 			printf("Use random seed %d\n", conf.rseed);
 			break;
 		case 'w':
+                        if (conf.iomodel != IO_MODEL_INVALID && conf.iomodel != IO_MODEL_DIRECT)
+                                PANIC("Async IO conflicts previous selected IO model %s", iomodel_str[conf.iomodel]);
                         check_mode("conf.aio_window_size (-w)", -1, 0);
 			conf.aio_window_size = atoi(optarg);
                         if (!conf.aio_window_size)
                                 PANIC("conf.aio_window_size (-w) must be > 0");
-                        if (conf.write_behind > 0)
-                                PANIC("AIO implies Direct IO that can't be used with write behind");
 			printf("AIO implies direct IO\n");
-			openflags_block &= ~O_SYNC;
-			openflags_block |= O_DIRECT;
-                        conf.write_behind = -1;
-                        model = IO_MODEL_ASYNC;
+                        conf.iomodel = IO_MODEL_ASYNC;
 			printf("Use AsyncIO with window size of %d requests per thread\n", conf.aio_window_size);
 			break;
 		case 't':
@@ -4179,21 +4263,31 @@ int main(int argc, char **argv)
 			if (!conf.nthreads)
 				PANIC("invalid threads parameter: -T %s", optarg);
 			break;
+                case 'G':
+                        if (conf.iomodel == IO_MODEL_SGIO) {
+                                conf.iomodel = IO_MODEL_SGIO_DIRECT;
+                                break;
+                        }
+                        if (conf.iomodel != IO_MODEL_INVALID)
+                                PANIC("SG IO conflicts previous selected IO model %s", iomodel_str[conf.iomodel]);
+                        check_mode("SCSI Generic IO mode", -1, 0);
+                        conf.iomodel = IO_MODEL_SGIO;
+                        break;
 		case 'W':
-                        if (conf.write_behind < 0)
-                                PANIC("Direct IO/aio can't be used with write behind");
+                        if (conf.iomodel != IO_MODEL_INVALID)
+                                PANIC("SG IO conflicts previous selected IO model %s", iomodel_str[conf.iomodel]);
                         check_mode("Allow write behind (-W)", -1, 0);
-			printf("Allow write behind\n");
-			openflags_block &= ~(O_SYNC | O_DIRECT);
-			conf.write_behind = 1;
+                        conf.iomodel = IO_MODEL_WRITE_BEHIND;
 			break;
 		case 'D':
-                        if (conf.write_behind > 0)
-                                PANIC("Direct IO can't be used with write behind");
-			printf("Use direct IO\n");
-			openflags_block &= ~O_SYNC;
-			openflags_block |= O_DIRECT;
-                        conf.write_behind = -1;
+                        if (conf.iomodel == IO_MODEL_DIRECT) {
+                                conf.iomodel = IO_MODEL_DIRECT_SYNC;
+                                break;
+                        }
+                        if (conf.iomodel != IO_MODEL_INVALID && conf.iomodel != IO_MODEL_ASYNC)
+                                PANIC("SG IO conflicts previous selected IO model %s", iomodel_str[conf.iomodel]);
+                        if (conf.iomodel == IO_MODEL_INVALID)
+                                conf.iomodel = IO_MODEL_DIRECT;
 			break;
 		case 'P':
                         parse_stampblock(optarg);
@@ -4285,6 +4379,13 @@ int main(int argc, char **argv)
 		}
 	}
 
+        if (conf.iomodel == IO_MODEL_INVALID)
+                conf.iomodel = IO_MODEL_SYNC; /* default */
+        if (conf.iomodel == IO_MODEL_ASYNC && conf.aio_window_size <= 0)
+                conf.aio_window_size = 1;
+        
+        printf("Use %s IO mode\n", iomodel_str[conf.iomodel]);
+        
         if (conf.secs < 0) {
                 printf("Using the default %d seconds time limit\n", DEFAULT_TIME_LIMIT);
                 conf.secs = DEFAULT_TIME_LIMIT;
@@ -4307,7 +4408,7 @@ int main(int argc, char **argv)
                 wl->trimsize = 0;
                 wl->randomratio = 0;
                 wl->readratio = 100;
-                model = IO_MODEL_SYNC;
+                conf.iomodel = IO_MODEL_SYNC;
                 conf.subtotal_interval = 0;
                 conf.warmup_sec = 0;
                 total_nworkloads = 1;
@@ -4371,8 +4472,13 @@ int main(int argc, char **argv)
         if (conf.verify && !(shared_file_ctx_arr = calloc(max_nfiles, sizeof *shared_file_ctx_arr)))
                 PANIC("can't alloc %d shared file ctx", max_nfiles);
 
-        switch (model) {
+        switch (conf.iomodel) {
         case IO_MODEL_SYNC:
+        case IO_MODEL_WRITE_BEHIND:
+        case IO_MODEL_SGIO:
+        case IO_MODEL_SGIO_DIRECT:
+        case IO_MODEL_DIRECT:
+        case IO_MODEL_DIRECT_SYNC:
                 /* nthreads per file, one worker per IO thread */
                 max_nthreads = conf.nfiles * conf.nthreads;
                 max_nworkers = max_nthreads;
@@ -4392,8 +4498,13 @@ int main(int argc, char **argv)
                 shared.cond_wait_func = sync_cond_wait_func;
                 shared.cond_broadcast_func = sync_cond_broadcast_func;                
 
-                shared.write = sync_write;
-                shared.read = sync_read;
+                if (conf.iomodel == IO_MODEL_SGIO) {
+                        shared.read = sg_read;
+                        shared.write = sg_write;
+                } else {
+                        shared.write = sync_write;
+                        shared.read = sync_read;
+                }
                 shared.prepare_buf = sync_prepare_buf;
                 shared.write_completed = io_write_completed;
                 shared.read_completed = io_read_completed;
@@ -4443,7 +4554,7 @@ int main(int argc, char **argv)
                 break;
 
         default:
-                PANIC("btest unknown IO model %d", model);
+                PANIC("btest unknown IO model %d", conf.iomodel);
         }
         
         return 0;

@@ -46,6 +46,21 @@ typedef uint32_t        uint32;
 typedef int64_t         int64;
 typedef uint64_t        uint64;
 
+typedef enum IOModel {
+        IO_MODEL_INVALID = 0,
+        IO_MODEL_SYNC,
+        IO_MODEL_ASYNC,
+        IO_MODEL_SGIO,
+        IO_MODEL_SGIO_DIRECT,
+        IO_MODEL_WRITE_BEHIND,
+        IO_MODEL_DIRECT,
+        IO_MODEL_DIRECT_SYNC,
+                
+        IO_MODEL_LAST
+} IOModel;
+
+extern char *iomodel_str[IO_MODEL_LAST];
+
 /**
  * Common configuration variables
  */
@@ -69,7 +84,6 @@ typedef struct BtestConf {
         /* configuration flags */
         int preformat;
         int pretrim;
-        int sg_mode;
         int write_behind;
         int report_workers;
         int activity_check;
@@ -77,6 +91,10 @@ typedef struct BtestConf {
         int verification_mode;
         int ignore_errors;
         int debug;
+        
+        /* long options */
+        char *csv_report;
+        IOModel iomodel;
 } BtestConf;
 
 extern BtestConf conf;
