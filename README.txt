@@ -1,3 +1,8 @@
+120212 - Version 151:
+	- cleanup IO modes
+	- add sgio_direct and direct_sync modes
+	- add CVS reports
+
 120131 - Version 150:
 	- add warmup, update doc
 	- fix timeout check
