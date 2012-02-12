@@ -243,7 +243,7 @@ char *iomodel_str[] = {
         [IO_MODEL_ASYNC] "async",
         [IO_MODEL_SGIO] "sgio",
         [IO_MODEL_SGIO_DIRECT] "sgio_direct",
-        [IO_MODEL_WRITE_BEHIND] "writebehind",
+        [IO_MODEL_WRITE_BEHIND] "write_behind",
         [IO_MODEL_DIRECT] "direct",    
         [IO_MODEL_DIRECT_SYNC] "direct_sync",    
 };
@@ -252,8 +252,8 @@ int openflags_iomodel[] = {
         [IO_MODEL_INVALID] 0,
         [IO_MODEL_SYNC] O_CREAT | O_LARGEFILE | O_NOATIME | O_SYNC,
         [IO_MODEL_ASYNC] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT,
-        [IO_MODEL_SGIO] O_RDWR | O_DIRECT,
-        [IO_MODEL_SGIO_DIRECT] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT | O_SYNC,      
+        [IO_MODEL_SGIO] O_RDWR,
+        [IO_MODEL_SGIO_DIRECT] O_RDWR | O_DIRECT,      
         [IO_MODEL_WRITE_BEHIND] O_CREAT | O_LARGEFILE | O_NOATIME,
         [IO_MODEL_DIRECT] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT,      
         [IO_MODEL_DIRECT_SYNC] O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT | O_SYNC,      
@@ -2957,17 +2957,18 @@ file_ctx *new_file_ctx(void)
         if (is_sg) {    /* automatically switch to SGIO model if SG device is discovered */
                 if (conf.iomodel != IO_MODEL_SGIO && (conf.iomodel != IO_MODEL_SYNC && ctx->num > 0))
                         PANIC("can't mix SG devices and non SG devices (found %s sg %d)", ctx->file, is_sg);
-                if (conf.iomodel != IO_MODEL_SGIO) {
+                if (conf.iomodel != IO_MODEL_SGIO && conf.iomodel != IO_MODEL_SGIO_DIRECT) {
                         conf.iomodel = IO_MODEL_SGIO;
                         shared.read = sg_read;
                         shared.write = sg_write;
                         printf("Switch to SGIO mode\n");
                 }
-        } else if (ctx->type == F_FILE && conf.iomodel == IO_MODEL_SGIO)
+        } else if (ctx->type == F_FILE && (conf.iomodel == IO_MODEL_SGIO || conf.iomodel == IO_MODEL_SGIO_DIRECT))
                 PANIC("can't use SGIO on file '%s'", ctx->file);
 
         openflags = openflags_iomodel[conf.iomodel];
-        openflags |= (readonly) ? O_RDONLY : O_RDWR;
+        if (conf.iomodel != IO_MODEL_SGIO)
+                openflags |= (readonly) ? O_RDONLY : O_RDWR;
         
         DEBUG("file '%s' IOModel: %s open flags: (octal) %o", ctx->file, iomodel_str[conf.iomodel], openflags);
 	fd = open(ctx->file, openflags, 0600);
@@ -3475,6 +3476,10 @@ static struct option btest_long_options[] = {
         {"iomode", 1, 0, 0},
         {"csv", 1, 0, 0},
         
+        {"sync", 0, 0, 0},
+        {"direct_sync", 0, 0, 0},
+        {"sgio_direct", 0, 0, 0},
+        
         {0, 0, 0, 0}
 };
 
@@ -3520,7 +3525,7 @@ void usage(void)
         printf("\t\t-w/--async_io <window size> - AsyncIO set window size in blocks per file per "
                 "worker thread. The total number of "
                 "inflight IOs is #threads*#files*window_size. > [0]\n");
-        printf("\t\t--iomode=<sync,direct,async,writebehind,sgio> select IO mode [sync]\n");
+        printf("\t\t--iomode=<sync,direct,direct_sync,async,write_behind,sgio,sgio_direct> select IO mode [sync]\n");
         printf("\t\t-P/--stampblock <size > - size of block to use when stamping writes. "
                 "Stamp is the dedup/write stamp (see -p) and/or offset stamp (see -O). Size 0 disables data stamping"
                 " [the default size is smallest of block size or 4k (see -b)]\n");
@@ -3548,6 +3553,9 @@ void usage(void)
 	printf("\t\t(Default -  O_CREAT | O_LARGEFILE | O_NOATIME | O_SYNC)\n");
 	printf("\t\t-W/--write_behind : Write behind mode : O_CREAT | O_LARGEFILE | O_NOATIME \n");
 	printf("\t\t-D/--direct  - use direct IO mode : O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT \n");
+	printf("\t\t-DD/--direct_sync  - use direct IO mode : O_CREAT | O_LARGEFILE | O_NOATIME | O_DIRECT | O_SYNC \n");
+        printf("\t\t-G/--sgio  -  force SCSI generic mode. Will not work for files. This is the default for /dev/sgX devices.\n");
+        printf("\t\t-GG/--sgio_sirect  -  force SCSI generic mode with direct IO mode. Will not work for files.\n");
 	printf("\tReal Time Reports:\n");
 	printf("\t\tsignal SIGUSR1 prints reports until now\n");
 	printf("\t\tsignal SIGUSR2 prints reports from last report\n");
@@ -4156,6 +4164,14 @@ int main(int argc, char **argv)
                                         PANIC("Can't open/create csv file %s: %m", optarg);
                                 /* make csv file line buffered */
                                 setlinebuf(csv_file);
+                        } else if (strncmp(unified_long_options[option_index].name, "sync", 5) == 0) {
+                                conf.iomodel = IO_MODEL_SYNC;
+                        } else if (strncmp(unified_long_options[option_index].name, "sgio", 5) == 0) {
+                                conf.iomodel = IO_MODEL_SGIO;
+                        } else if (strncmp(unified_long_options[option_index].name, "sgio_direct", 12) == 0) {
+                                conf.iomodel = IO_MODEL_SGIO_DIRECT;
+                        } else if (strncmp(unified_long_options[option_index].name, "direct_sync", 12) == 0) {
+                                conf.iomodel = IO_MODEL_DIRECT_SYNC;
                         } else if (strncmp(unified_long_options[option_index].name, "iomode", 7) == 0) {
                                 char **s;
                                 for (s = iomodel_str; s < iomodel_str + IO_MODEL_LAST; s++) {
