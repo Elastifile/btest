@@ -618,7 +618,7 @@ void xdump(void const *p, int size, char *msg)
 {
         uint8_t const *cp = p;
         char buf[4096], *s = buf, *ascii;
-        int i, o;
+        int i;
 
         s += snprintf(buf, sizeof(buf)-XDUMP_LINESZ-1, "xdump: %s\n", msg);
         _xdump_line_start(s, 0, &s, &ascii);
@@ -627,7 +627,6 @@ void xdump(void const *p, int size, char *msg)
                 *s++ = HEX(*cp >> 4);
                 *s++ = HEX(*cp & 0xf);
 
-                o = i % 16;
                 if (isgraph(*cp))
                         *ascii++ = *cp;
                 else
@@ -639,7 +638,6 @@ void xdump(void const *p, int size, char *msg)
                 *s++ = HEX(cp[1] >> 4);
                 *s++ = HEX(cp[1] & 0xf);
 
-                o = i % 16;
                 if (isgraph(cp[1]))
                         *ascii++ = cp[1];
                 else
@@ -871,7 +869,7 @@ int unref_block_md(worker_ctx *worker, block_md *md, int writer)
 {
         md_file_hdr *hdr = worker->fctx->shared.hdr;
         block_worker_md *owner;
-        uint64 ref, stamp, old, prev;
+        uint64 ref, stamp, prev;
 
         while (1) {
                 uint refed;
@@ -929,8 +927,6 @@ int unref_block_md(worker_ctx *worker, block_md *md, int writer)
                 stamp = owner->stamp;
         else
                 stamp = owner->old;
-
-        old = owner->old;
 
         DEBUG3("last ref on entry %d, free worker md and worker map, set stamp to %lx", owner->id, BLOCK_STAMP(stamp));
 
