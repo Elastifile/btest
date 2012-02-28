@@ -95,6 +95,8 @@ typedef struct BtestConf {
         /* long options */
         char *csv_report;
         IOModel iomodel;
+        
+        int force_md_init;
 } BtestConf;
 
 extern BtestConf conf;
@@ -109,9 +111,9 @@ extern BtestConf conf;
 #endif
 #define PANIC(fmt, args...)	panic(__FUNCTION__, fmt, ## args)
 
-#define DEBUG(fmt, args...)	if (conf.debug) warn(__FUNCTION__, fmt, ## args)
-#define DEBUG2(fmt, args...)	if (conf.debug > 1) warn(__FUNCTION__, fmt, ## args)
-#define DEBUG3(fmt, args...)	if (conf.debug > 2) warn(__FUNCTION__, fmt, ## args)
+#define DEBUG(fmt, args...)	do { if (conf.debug) warn(__FUNCTION__, fmt, ## args); } while (0)
+#define DEBUG2(fmt, args...)	do { if (conf.debug > 1) warn(__FUNCTION__, fmt, ## args); } while (0)
+#define DEBUG3(fmt, args...)	do { if (conf.debug > 2) warn(__FUNCTION__, fmt, ## args); } while (0)
 
 /* btest.c */
 void panic(const char *fn, char *msg, ...); 

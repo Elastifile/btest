@@ -121,7 +121,10 @@ struct block_worker_md {
 #define MD_MAX_MD_MAPS     (MD_MAX_WORKERS*(MD_MAX_BLOCK_SIZE/512)*2)
 #define MD_VERSION         100          /* major 1, minor 0 - btest binary major must >= file md */
 
+#define MD_MAGIC        0x7131f1f1
+
 typedef struct md_file_hdr {
+        uint32 magic;
         char devname[256];
         uint version;
         uint initialized;

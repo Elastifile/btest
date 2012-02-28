@@ -174,6 +174,8 @@ BtestConf conf = {
         
         .csv_report = 0,                /** by default no CSV report are produced */
         .iomodel = IO_MODEL_INVALID,    /** by default SYNC IO is used */
+        
+        .force_md_init = 0,             /** by default do not force */
 };
 
 
@@ -616,7 +618,7 @@ void xdump(void const *p, int size, char *msg)
 {
         uint8_t const *cp = p;
         char buf[4096], *s = buf, *ascii;
-        int i, o = 0;
+        int i, o;
 
         s += snprintf(buf, sizeof(buf)-XDUMP_LINESZ-1, "xdump: %s\n", msg);
         _xdump_line_start(s, 0, &s, &ascii);
@@ -869,7 +871,7 @@ int unref_block_md(worker_ctx *worker, block_md *md, int writer)
 {
         md_file_hdr *hdr = worker->fctx->shared.hdr;
         block_worker_md *owner;
-        uint64 ref = 0, stamp, old, prev;
+        uint64 ref, stamp, old, prev;
 
         while (1) {
                 uint refed;
@@ -2699,6 +2701,7 @@ static void init_md_hdr(file_ctx *ctx, md_file_hdr *hdr, size_t hdrsize, size_t 
         hdr->max_mds = sizeof hdr->workers_map / sizeof (uint);
         hdr->md_start = hdrsize;
         hdr->version = MD_VERSION;
+        hdr->magic = MD_MAGIC;
         hdr->initialized = 1;
 
         hdr->hdrsize = hdrsize;
@@ -2764,6 +2767,17 @@ static int init_validation_md(file_ctx *fctx, uint64 start, uint64 end)
                 
                 if ((file_shared->hdr = mmap(NULL, hdrsize, PROT_WRITE | PROT_READ, flags, file_shared->fd, 0)) == (void *)-1)
                         PANIC("mmap failed: '%s' arg md calloc: size %lu", file_shared->md_file, hdrsize);
+                
+                if (file_shared->hdr->magic != MD_MAGIC || conf.force_md_init) {
+                        if (file_shared->hdr->magic != MD_MAGIC)
+                                DEBUG("initializing %s: bad md hdr (magic bad %x != %x)",
+                                        file_shared->md_file, file_shared->hdr->magic, MD_MAGIC);
+                        else if (conf.force_md_init)
+                                DEBUG("initializing %s: bad md hdr (force md init)", file_shared->md_file);
+                        
+                        memset(file_shared->hdr, 0, hdrsize);
+                        file_shared->hdr->magic = MD_MAGIC;
+                }
                 
                 if (!(ref = atomic_fetch_and_inc32(&file_shared->hdr->ref)) && !file_shared->hdr->initialized) {
                         /* non initialized file and first to ref it */
@@ -3480,6 +3494,8 @@ static struct option btest_long_options[] = {
         {"direct_sync", 0, 0, 0},
         {"sgio_direct", 0, 0, 0},
         
+        {"force_md_init", 0, 0, 0},
+        
         {0, 0, 0, 0}
 };
 
@@ -3548,6 +3564,7 @@ void usage(void)
                 "Set to 0 to disable check [default %d msec]\n", conf.timeout_ms);
         printf("\t\t-v/--verify  - verify stamps after each read (see options -p, -P and -O [False]\n");
         printf("\t\t-c/--check  - like verify, but stop on verification errors [False]\n");
+        printf("\t\t--force_md_init  -  force initialization of verification md. Useful when md backend is a block device\n");
         printf("\t\t-i/--ignore_errors  - do not stop on errors, just count them [False]\n");
 	printf("\tOpen flags options:\n");
 	printf("\t\t(Default -  O_CREAT | O_LARGEFILE | O_NOATIME | O_SYNC)\n");
@@ -4172,6 +4189,9 @@ int main(int argc, char **argv)
                                 conf.iomodel = IO_MODEL_SGIO_DIRECT;
                         } else if (strncmp(unified_long_options[option_index].name, "direct_sync", 12) == 0) {
                                 conf.iomodel = IO_MODEL_DIRECT_SYNC;
+                        } else if (strncmp(unified_long_options[option_index].name, "force_md_init", 14) == 0) {
+                                conf.force_md_init = 1;
+                                printf("forcing initialization of verification md data\n");
                         } else if (strncmp(unified_long_options[option_index].name, "iomode", 7) == 0) {
                                 char **s;
                                 for (s = iomodel_str; s < iomodel_str + IO_MODEL_LAST; s++) {
