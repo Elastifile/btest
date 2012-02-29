@@ -2987,7 +2987,13 @@ file_ctx *new_file_ctx(void)
         /* file type files should not be checked now, they can be zero sized */
         if (fd >= 0 && ctx->type != F_FILE) {
                 char* buf = valloc(iosize);
-                if (shared.read(NULL, fd, buf, iosize, startoffset) < 0) {
+                ssize_t (*readfn)(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset) = shared.read;
+                
+                /* we don't have worker struct here, so use sync io for this check */
+                if (conf.iomodel == IO_MODEL_ASYNC)
+                        readfn = sync_read;
+
+                if (readfn(NULL, fd, buf, iosize, startoffset) < 0) {
                         close(fd);
                         fd = -1; 
                 }
