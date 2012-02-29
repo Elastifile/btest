@@ -1901,7 +1901,7 @@ void doexit()
 	time(&t);
 	printf("Test is done at %s", ctime(&t));
         
-        exit(0);
+        exit(total.verify_errors);
 }
 
 /**
