@@ -1,3 +1,8 @@
+120229 - Version 153:
+	- fix small bug in async init
+	- verify only (no exit on verify errors) exit with non zero code at
+	  the end of the veririfaction.
+
 120212 - Version 151:
 	- cleanup IO modes
 	- add sgio_direct and direct_sync modes
