@@ -817,9 +817,7 @@ block_worker_md *ref_block_md(worker_ctx *worker, block_md *md, block_worker_md 
                         DEBUG2("lost race on refed stamp - can't ref block_worker_md %p %u - version %lx, old %lx new %lx",
                                 owner, owner->id, owner->verref, old, new);
                 }
-
         }
-
 }
 
 /**
@@ -989,7 +987,8 @@ block_worker_md *alloc_block_worker_md(worker_ctx *worker, uint64 stamp, uint64 
         if (!wmd)
                 PANIC("couldn't alloc worker md (max mds %d) "
                         "-- Please reduce number of threads/workers or lower"
-                        "the max bloc size/stamp block ratio", hdr->max_mds);
+                        "the max bloc size/stamp block ratio.\n"
+                        "-- May also be a result of too many IO errors, or corrupt MD file.", hdr->max_mds);
                 
         DEBUG3("alloced %p id %d", wmd, wmd->id);
         wmd->verref = BLOCK_MD_VERREF(saferandom64(&worker->rbuf), 1); /* new version, set ref to 1 */
@@ -1653,8 +1652,8 @@ void worker_summary(worker_ctx * worker, IOStats * subtotal)
 		subtotal->sduration = worker->stats.duration;
 		subtotal->ops += stats->ops;
 		subtotal->bytes += stats->bytes;
-		subtotal->errors += stats->verify_errors;
-		subtotal->verify_errors += stats->errors;
+		subtotal->errors += stats->errors;
+		subtotal->verify_errors += stats->verify_errors;
                 for (i = 0; i < HICCUP_LEVEL_NUM_OF; i++)
                         subtotal->hickup_histogram[i] += stats->hickup_histogram[i];
                 if (stats->max_duration > subtotal->max_duration)
@@ -2153,7 +2152,7 @@ ssize_t sync_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t off
 {
         ssize_t r = pread(fd, buf, count, offset);
 
-        if (conf.verify && worker)
+        if (conf.verify && worker && r == count)
                 shared.read_completed(worker, buf, offset, count);
 
         return r;
@@ -2163,7 +2162,7 @@ ssize_t sync_write(worker_ctx *worker, int fd, void *buf, size_t count, off_t of
 {
         ssize_t r = pwrite(fd, buf, count, offset);
 
-        if (conf.verify && worker)
+        if (conf.verify && worker && r == count)
                 shared.write_completed(worker, buf, offset, count);
 
         return r;
@@ -2176,7 +2175,7 @@ ssize_t sg_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t offse
 {
         int r = sg_rw(fd, 0, buf, count/512, offset/512, 512, 10, 0, 0, NULL, 0, 0);
 
-        if (conf.verify && worker)
+        if (conf.verify && worker && r == count)
                 shared.read_completed(worker, buf, offset, count);
 
         if (r == 0)
@@ -2188,7 +2187,7 @@ ssize_t sg_write(worker_ctx* worker, int fd, void *buf, size_t count, off_t offs
 {
         int r = sg_rw(fd, 1, buf, count/512, offset/512, 512, 10, 0, 0, NULL, 0, 0);
 
-        if (conf.verify && worker)
+        if (conf.verify && worker && r == count)
                 shared.write_completed(worker, buf, offset, count);
 
         if (r == 0)
@@ -3328,7 +3327,15 @@ void *aio_thread(aio_thread_ctx *athread)
 
                         r = 0;
 
-                        if (conf.verify) {
+                        /* verify the IO result code and size */
+                        if (!io_event_is_valid(event) || event->res != completed_iocb->u.c.nbytes) {
+                                r = -1;
+
+                                WARN("%d: IO error on '%s (event %d out of %d). return code %d. number of bytes "
+                                        "processed is %d out of %d.",
+                                        worker->tid, fctx->file, i, aiores,
+                                        event->res2, event->res, completed_iocb->u.c.nbytes);
+                        } else if (conf.verify) {               /* intentionally leave IO as open in case of errors */
                                 if (completed_iocb->aio_lio_opcode == 1/*LIO_WRITE*/)
                                         shared.write_completed(worker, completed_iocb->u.c.buf,
                                                                 completed_iocb->u.c.offset, completed_iocb->u.c.nbytes);
@@ -3339,16 +3346,6 @@ void *aio_thread(aio_thread_ctx *athread)
                                         WARN("unknown aio code: %u", (uint)completed_iocb->aio_lio_opcode);
                         }
                         
-                        /* verify the IO result code and size */
-                        if (!io_event_is_valid(event) || event->res != completed_iocb->u.c.nbytes) {
-                                r = -1;
-
-                                WARN("%d: IO error on '%s (event %d out of %d). return code %d. number of bytes "
-                                        "processed is %d out of %d.",
-                                        worker->tid, fctx->file, i, aiores,
-                                        event->res2, event->res, completed_iocb->u.c.nbytes);
-                        }
-
                         if ((fctx->fd != completed_iocb->aio_fildes) || (wl->blocksize != completed_iocb->u.c.nbytes)) {
                                 WARN("AsyncIO completion mismatch (event %d out of %d): fd is %d, expected %d. "
                                         "blocksize is %d expected %d",
