@@ -765,6 +765,8 @@ block_worker_md *ref_block_md(worker_ctx *worker, block_md *md, block_worker_md 
         md_file_hdr *hdr = worker->fctx->shared.hdr;
         block_worker_md *owner;
 
+        DEBUG3("worker %p md %p (id %d)", worker, md, md - worker->fctx->shared.md);
+        
         while (1) {
                 uint64 prev;
                 uint refed;
@@ -2296,12 +2298,18 @@ int do_rand_trim(worker_ctx * worker)
  * 
  * This function is not thread safe and doesn't handle md reseting.
  */
-void do_format(file_ctx *ctx, char *file, uint64_t start, uint64_t size)
+void do_format(char *file, uint64_t start, uint64_t size, IOModel iomodel)
 {
 	int ios = 0;
 	int iosize;
 	int fd;
 
+        ssize_t (*writefn)(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset) = shared.write;
+
+        /* we don't have worker struct here, so use sync io for format */
+        if (iomodel == IO_MODEL_ASYNC)
+                writefn = sync_write;
+        
         fd = open(file, O_RDWR | O_CREAT | O_LARGEFILE | O_NOATIME, 0600);
         if (fd < 0 && shared.ext.open_failure)
                 fd = shared.ext.open_failure(file, O_RDWR | O_CREAT | O_LARGEFILE | O_NOATIME, 0600);
@@ -2315,7 +2323,7 @@ void do_format(file_ctx *ctx, char *file, uint64_t start, uint64_t size)
 		if (iosize > size)
 			iosize = size;
 		DEBUG2("format IO: %s offs %" PRId64 " iosize %d", file, start, iosize);
-                if (shared.write(NULL, fd, formatbuf, iosize, start) != iosize) 
+                if (writefn(NULL, fd, formatbuf, iosize, start) != iosize) 
                                 PANIC("io failed on %s during format offset %" PRId64, file, start);
 		size -= iosize;
 		start += iosize;
@@ -2773,6 +2781,8 @@ static int init_validation_md(file_ctx *fctx, uint64 start, uint64 end)
                         
                         memset(file_shared->hdr, 0, hdrsize);
                         file_shared->hdr->magic = MD_MAGIC;
+                        
+                        do_format(file_shared->md_file, hdrsize, size, IO_MODEL_SYNC);
                 }
                 
                 if (!(ref = atomic_fetch_and_inc32(&file_shared->hdr->ref)) && !file_shared->hdr->initialized) {
@@ -2876,7 +2886,7 @@ void init_file_range(file_ctx *ctx, uint64  start, uint64 end)
 
         if (conf.preformat) {
                 /* TODO: make do format use stamp block */
-                do_format(ctx, ctx->file, start, end - start);
+                do_format(ctx->file, start, end - start, conf.iomodel);
 
                 reset_block_md(ctx, start, end);
         }
