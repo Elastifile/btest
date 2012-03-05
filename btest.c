@@ -2306,7 +2306,7 @@ void do_format(char *file, uint64_t start, uint64_t size, IOModel iomodel)
         ssize_t (*writefn)(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset) = shared.write;
 
         /* we don't have worker struct here, so use sync io for format */
-        if (iomodel == IO_MODEL_ASYNC)
+        if (iomodel == IO_MODEL_ASYNC || iomodel == IO_MODEL_SYNC)
                 writefn = sync_write;
         
         fd = open(file, O_RDWR | O_CREAT | O_LARGEFILE | O_NOATIME, 0600);
