@@ -2388,27 +2388,28 @@ void do_trimformat(int atafd, uint64_t start, int64_t size)
  * 
  * @note dedup_likehood 0 => no dedup at all, -1 => no stamps. modulo
  */
-static int64 calc_dedup_stamp_modulo(uint64 span, int dedup_likehood)
+static int64 calc_dedup_stamp_modulo(uint64 span, uint blocksize, int *dedup_likehood)
 {
         double blocks = span / conf.stampblock;
         uint64 dedup_stamp_modulo;
 
-        if (dedup_likehood == 0)
+        if (*dedup_likehood == 0)
                 return 0;       /* no dedup - use full symbol range */
 
-        if (dedup_likehood == -1)
+        if (*dedup_likehood == -1)
                 return -1;      /* do not use stamps at all */
 
-        if (dedup_likehood == -2)
+        if (*dedup_likehood == -2)
                 return 1;      /* use fixed stamps at all */
         
         DEBUG2("blocks for dedup calc %f", blocks);
-
-        dedup_stamp_modulo = (blocks / dedup_likehood);
+        *dedup_likehood *= (blocksize / conf.stampblock);
+        dedup_stamp_modulo = (blocks / (*dedup_likehood));
         if (!dedup_stamp_modulo)
                 dedup_stamp_modulo = 1;
 
-        DEBUG("dedup stamp likehood %d modulu %lu", dedup_likehood, dedup_stamp_modulo);
+        DEBUG("dedup stamp likehood %d modulu %lu (factor due to blocksize/stampblock ratio %d)",
+                *dedup_likehood, dedup_stamp_modulo, blocksize / conf.stampblock);
         return dedup_stamp_modulo;
 }
 
@@ -2913,7 +2914,7 @@ void init_workload_context(file_ctx *ctx, workload_ctx *wlctx, workload *wl)
                 PANIC("file/dev %s size %lu doesn't match workload %d start %lu len %lu (wlctx len %ld wl blocksize %d)",
                         ctx->file, ctx->size, wl->num, wl->startoffset, wl->len, wlctx->len, wl->blocksize);
 
-        wlctx->dedup_stamp_modulo = calc_dedup_stamp_modulo(wlctx->len, wl->dedup_likehood);
+        wlctx->dedup_stamp_modulo = calc_dedup_stamp_modulo(wlctx->len, wl->blocksize, &wl->dedup_likehood);
         wlctx->start = wl->startoffset;
         wlctx->end = wlctx->start + wlctx->len;
 
@@ -4027,6 +4028,9 @@ void init_workloads(void)
                         conf.stampblock = minblocksize;
                 else
                         conf.stampblock = DEF_STAMPBLOCK;
+                DEBUG("set stampblock to min blocksz: stampblock: %u", conf.stampblock);
+        } else {
+                DEBUG("user assinged blocksz: stampblock: %u", conf.stampblock);
         }
         
         /* verify all workloads */
