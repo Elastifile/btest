@@ -1045,7 +1045,7 @@ uint64 generate_dedup_stamp(worker_ctx *worker)
                 /* races may happen, but how cares? */
                 *last = saferandom64(rand_buff);
                 if (*last == 0)
-                        *last++;
+                        (*last)++;
                 return *last;
         }
 
