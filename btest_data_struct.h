@@ -143,6 +143,8 @@ struct workload_ctx {
         uint64 len;                 /**< length of data range for this workload */
         uint64 start;               /**< convenience: start offset of workload */
         uint64 end;                 /**< convenience: end offset of workload */
+        
+        uint64 last_stamp;          /**< state used for progrssive dedup generation see generate_dedup_stamp() */
         uint32 dedup_fill_counter;  /**< for progressive dedup fills */
 
         workload *wl;               /**< used workload */
@@ -219,11 +221,11 @@ struct file_ctx {
         int initialized;
         int usestamps;
         int fd;                 /**< File descriptor */
-        FileType type;               /**< type */
+        FileType type;          /**< type */
 	int64 size;		/**< Total size of device/file in bytes */
         int atafd;		/**< fd for ATA specific opertaions, e.g. trim */
 
-        IOStats stats;              /**< Accumulative statistics from the start */
+        IOStats stats;          /**< Accumulative statistics from the start */
 
         workload_ctx wlctxs[MAX_WORKLOADS];     /* all workload contexts for this file */
         shared_file_ctx shared;

@@ -1024,10 +1024,15 @@ block_worker_md *alloc_block_worker_md(worker_ctx *worker, uint64 stamp, uint64 
  *
  * This stamp is also used for verification (see the header notes).
  */
-uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size, int dedup_likehood, uint32 *counter)
+uint64 generate_dedup_stamp(worker_ctx *worker)
 {
+        workload_ctx *wlctx = worker->wlctx;
+        int64 space_size = wlctx->dedup_stamp_modulo;
+        int dedup_likehood = wlctx->wl->dedup_likehood;
+        uint32 *counter = &wlctx->dedup_fill_counter;
+        uint64 *last = &wlctx->last_stamp;
+        struct drand48_data * rand_buff = &worker->rbuf;
         uint64 stamp;
-        static uint64 last = 1;         /* just in case last is used before first init */
         
         /* fixed stamp "-p -2" */
         if (dedup_likehood < 0)
@@ -1036,12 +1041,12 @@ uint64 generate_dedup_stamp(struct drand48_data * rand_buff, int64 space_size, i
         /* Progressive fill, use same stamp 'dedup_likehood' times */
         if (use_stamps > 1) {
                 if (dedup_likehood > 0 && (atomic_fetch_and_inc32(counter) % dedup_likehood))
-                        return last;
+                        return *last;
                 /* races may happen, but how cares? */
-                last = saferandom64(rand_buff);
-                if (last == 0)
-                        last++;
-                return last;
+                *last = saferandom64(rand_buff);
+                if (*last == 0)
+                        *last++;
+                return *last;
         }
 
         stamp = saferandom64(rand_buff);
@@ -1088,8 +1093,7 @@ int stamp_block(worker_ctx *worker, char *buf, int len, uint64 offset, int write
 
         blockid = offset / conf.stampblock;
         md = fctx->shared.md + blockid;
-        stamp = generate_dedup_stamp(&worker->rbuf, wlctx->dedup_stamp_modulo,
-                                     wlctx->wl->dedup_likehood, &wlctx->dedup_fill_counter);
+        stamp = generate_dedup_stamp(worker);
         
         if (conf.verify) {
                 /*
@@ -2917,6 +2921,7 @@ void init_workload_context(file_ctx *ctx, workload_ctx *wlctx, workload *wl)
         wlctx->dedup_stamp_modulo = calc_dedup_stamp_modulo(wlctx->len, wl->blocksize, &wl->dedup_likehood);
         wlctx->start = wl->startoffset;
         wlctx->end = wlctx->start + wlctx->len;
+        wlctx->last_stamp = 1;
 
         DEBUG("workload %d file '%s' size is %" PRId64 " using blocksize %d aligned to %d",
                 wl->num, ctx->file, ctx->size, wl->blocksize, wl->alignsize);
