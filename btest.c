@@ -1028,7 +1028,7 @@ uint64 generate_dedup_stamp(worker_ctx *worker)
 {
         workload_ctx *wlctx = worker->wlctx;
         int64 space_size = wlctx->dedup_stamp_modulo;
-        int dedup_likehood = wlctx->wl->dedup_likehood;
+        int dedup_likehood = wlctx->dedup_likehood;
         uint32 *counter = &wlctx->dedup_fill_counter;
         uint64 *last = &wlctx->last_stamp;
         struct drand48_data * rand_buff = &worker->rbuf;
@@ -2918,7 +2918,8 @@ void init_workload_context(file_ctx *ctx, workload_ctx *wlctx, workload *wl)
                 PANIC("file/dev %s size %lu doesn't match workload %d start %lu len %lu (wlctx len %ld wl blocksize %d)",
                         ctx->file, ctx->size, wl->num, wl->startoffset, wl->len, wlctx->len, wl->blocksize);
 
-        wlctx->dedup_stamp_modulo = calc_dedup_stamp_modulo(wlctx->len, wl->blocksize, &wl->dedup_likehood);
+        wlctx->dedup_likehood = wl->dedup_likehood;
+        wlctx->dedup_stamp_modulo = calc_dedup_stamp_modulo(wlctx->len, wl->blocksize, &wlctx->dedup_likehood);
         wlctx->start = wl->startoffset;
         wlctx->end = wlctx->start + wlctx->len;
         wlctx->last_stamp = 1;

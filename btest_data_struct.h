@@ -139,11 +139,12 @@ typedef struct md_file_hdr {
 } md_file_hdr;
 
 struct workload_ctx {
-        int64 dedup_stamp_modulo;   /**< Modulul stamp in this value to enlarge dedup likelihood */
         uint64 len;                 /**< length of data range for this workload */
         uint64 start;               /**< convenience: start offset of workload */
         uint64 end;                 /**< convenience: end offset of workload */
         
+        int64 dedup_stamp_modulo;   /**< Modulul stamp in this value to enlarge dedup likelihood */
+        int dedup_likehood;      /**< fixed ratio */
         uint64 last_stamp;          /**< state used for progrssive dedup generation see generate_dedup_stamp() */
         uint32 dedup_fill_counter;  /**< for progressive dedup fills */
 
