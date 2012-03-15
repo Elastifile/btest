@@ -1,3 +1,7 @@
+120229 - Version 154:
+	- fix format md with async
+	- fix dedup calc for progressive fills
+
 120229 - Version 153:
 	- fix small bug in async init
 	- verify only (no exit on verify errors) exit with non zero code at
