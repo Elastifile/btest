@@ -1,6 +1,8 @@
-120229 - Version 154:
-	- fix format md with async
+120315 - Version 155:
 	- fix dedup calc for progressive fills
+
+120301 - Version 154:
+	- fix block + md verify bug, format md area
 
 120229 - Version 153:
 	- fix small bug in async init
