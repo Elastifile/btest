@@ -227,7 +227,7 @@ struct file_ctx {
         int atafd;		/**< fd for ATA specific opertaions, e.g. trim */
 
         IOStats stats;          /**< Accumulative statistics from the start */
-
+        
         workload_ctx wlctxs[MAX_WORKLOADS];     /* all workload contexts for this file */
         shared_file_ctx shared;
         

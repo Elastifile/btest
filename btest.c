@@ -1040,7 +1040,7 @@ uint64 generate_dedup_stamp(worker_ctx *worker)
         
         /* Progressive fill, use same stamp 'dedup_likehood' times */
         if (progressive && dedup_likehood > 0 && (atomic_fetch_and_inc32(counter) % dedup_likehood))
-                return *last;
+                        return *last;
 
         stamp = saferandom64(&worker->rbuf);
         /* module == 0 means no dedup - keep stamp as it is */
@@ -2150,8 +2150,16 @@ void *sync_prepare_buf(worker_ctx *worker)
 
 ssize_t sync_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset)
 {
-        ssize_t r = pread(fd, buf, count, offset);
+        ssize_t r;
 
+        do {
+                r = pread(fd, buf, count, offset);
+
+                if (r > 0 && r != count)
+                        WARN("retry incomplete (sync) read IO to %s offset %"PRIu64 " sz %u failed!",
+                             worker->fctx->file, offset, count);
+        } while (r > 0 && r != count);
+        
         if (conf.verify && worker && r == count)
                 shared.read_completed(worker, buf, offset, count);
 
@@ -2160,8 +2168,16 @@ ssize_t sync_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t off
 
 ssize_t sync_write(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset)
 {
-        ssize_t r = pwrite(fd, buf, count, offset);
+        ssize_t r;
 
+        do {
+                r = pwrite(fd, buf, count, offset);
+
+                if (r > 0 && r != count)
+                        WARN("retry incomplete (sync) write IO to %s offset %"PRIu64 " sz %u failed!",
+                             worker->fctx->file, offset, count);
+        } while (r > 0 && r != count);
+        
         if (conf.verify && worker && r == count)
                 shared.write_completed(worker, buf, offset, count);
 
@@ -2532,6 +2548,7 @@ int do_seq_write(worker_ctx * worker)
 
 	if (shared.write(worker, fctx->fd, buf, wl->blocksize, worker->offset) != wl->blocksize)
 		return -1;
+
 	worker->offset = next_seq_offset(worker);        /* update offset for next (seq) operation */
         
 	return 0;
@@ -3349,12 +3366,28 @@ void *aio_thread(aio_thread_ctx *athread)
                                         WARN("unknown aio code: %u", (uint)completed_iocb->aio_lio_opcode);
                         }
                         
-                        if ((fctx->fd != completed_iocb->aio_fildes) || (wl->blocksize != completed_iocb->u.c.nbytes)) {
-                                WARN("AsyncIO completion mismatch (event %d out of %d): fd is %d, expected %d. "
-                                        "blocksize is %d expected %d",
+                        if (fctx->fd != completed_iocb->aio_fildes) {
+                                WARN("AsyncIO completion mismatch (event %d out of %d): fd is %d, expected %d. ",
+                                        i, aiores,
+                                        completed_iocb->aio_fildes, fctx->fd);
+                        }
+
+                        if (event->res != completed_iocb->u.c.nbytes) {
+                                WARN("AsyncIO completion mismatch (event %d out of %d): blocksize is %d expected %d",
                                         i, aiores,
                                         completed_iocb->aio_fildes, fctx->fd,
                                         completed_iocb->u.c.nbytes, wl->blocksize);
+                                
+                                /* retry IO  in case of incomplete io */
+                                inflight_ios_count++;
+                                if (shared.write(worker, fctx->fd, shared.prepare_buf(worker),
+                                                 wl->blocksize, worker->offset) == wl->blocksize)
+                                        continue;
+                                
+                                WARN("retry incomplete IO to %s offset %"PRIu64 " sz %u failed!",
+                                     fctx->file, worker->offset, wl->blocksize);
+                                
+                                /* fall through to error path */
                         }
 
                         /*printf("-- AsyncIO completion details: fd=%d buf=%p nbytes=%d offset=%d. rc=%d nbytes=%d. \n",

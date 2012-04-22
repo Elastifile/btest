@@ -2,7 +2,7 @@
 TARGET:=btest
 HDRS=btest.h sgio.h hdparm.h
 SRCS:=btest.c ata.c sgio.c sg_read.c
-LIBS:=pthread rt aio
+LIBS:=pthread rt aio m
  
 EXT_IMP?=
 
