@@ -3351,8 +3351,8 @@ void *aio_thread(aio_thread_ctx *athread)
                         if (!io_event_is_valid(event) || event->res != completed_iocb->u.c.nbytes) {
                                 r = -1;
 
-                                WARN("%d: IO error on '%s (event %d out of %d). return code %d. number of bytes "
-                                        "processed is %d out of %d.",
+                                WARN("%d: IO error on '%s (event %d out of %d). return code %lu. number of bytes "
+                                        "processed is %lu out of %lu.",
                                         worker->tid, fctx->file, i, aiores,
                                         event->res2, event->res, completed_iocb->u.c.nbytes);
                         } else if (conf.verify) {               /* intentionally leave IO as open in case of errors */
@@ -3366,28 +3366,25 @@ void *aio_thread(aio_thread_ctx *athread)
                                         WARN("unknown aio code: %u", (uint)completed_iocb->aio_lio_opcode);
                         }
                         
-                        if (fctx->fd != completed_iocb->aio_fildes) {
-                                WARN("AsyncIO completion mismatch (event %d out of %d): fd is %d, expected %d. ",
-                                        i, aiores,
-                                        completed_iocb->aio_fildes, fctx->fd);
-                        }
+                        if (io_event_is_valid(event)) {
+                                if (fctx->fd != completed_iocb->aio_fildes) {
+                                        WARN("AsyncIO completion mismatch (event %d out of %d): fd is %d, expected %d. ",
+                                                i, aiores, completed_iocb->aio_fildes, fctx->fd);
+                                } else if (event->res != completed_iocb->u.c.nbytes) {
+                                        WARN("AsyncIO completion mismatch (event %d out of %d): res is %lu expected %lu",
+                                                i, aiores, event->res, completed_iocb->u.c.nbytes);
 
-                        if (event->res != completed_iocb->u.c.nbytes) {
-                                WARN("AsyncIO completion mismatch (event %d out of %d): blocksize is %d expected %d",
-                                        i, aiores,
-                                        completed_iocb->aio_fildes, fctx->fd,
-                                        completed_iocb->u.c.nbytes, wl->blocksize);
-                                
-                                /* retry IO  in case of incomplete io */
-                                inflight_ios_count++;
-                                if (shared.write(worker, fctx->fd, shared.prepare_buf(worker),
-                                                 wl->blocksize, worker->offset) == wl->blocksize)
-                                        continue;
-                                
-                                WARN("retry incomplete IO to %s offset %"PRIu64 " sz %u failed!",
-                                     fctx->file, worker->offset, wl->blocksize);
-                                
-                                /* fall through to error path */
+                                        /* retry IO  in case of incomplete io */
+                                        inflight_ios_count++;
+                                        if (shared.write(worker, fctx->fd, shared.prepare_buf(worker),
+                                                        wl->blocksize, worker->offset) == wl->blocksize)
+                                                continue;
+
+                                        WARN("retry incomplete IO to %s offset %"PRIu64 " sz %u failed!",
+                                        fctx->file, worker->offset, wl->blocksize);
+
+                                        /* fall through to error path */
+                                }
                         }
 
                         /*printf("-- AsyncIO completion details: fd=%d buf=%p nbytes=%d offset=%d. rc=%d nbytes=%d. \n",
