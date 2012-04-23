@@ -4202,7 +4202,8 @@ int main(int argc, char **argv)
 	else
 		prog++;
 
-	conf.rseed = time(0);
+        /* try to ensure that the default random seed is different among btest instances */
+	conf.rseed = timestamp() * getpid();
 
         optind = 0;
         /* allow extensions to add options */
