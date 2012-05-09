@@ -2935,7 +2935,7 @@ void init_workload_context(file_ctx *ctx, workload_ctx *wlctx, workload *wl)
         wlctx->last_stamp = 1;
         wlctx->dedup_stamp_modulo = calc_dedup_stamp_modulo(wlctx->len, wl->blocksize, &wlctx->dedup_likehood);
         wlctx->start = wl->startoffset;
-        wlctx->end = wlctx->start + wlctx->len;
+        wlctx->end = wlctx->len;
 
         DEBUG("workload %d file '%s' size is %" PRId64 " using blocksize %d aligned to %d",
                 wl->num, ctx->file, ctx->size, wl->blocksize, wl->alignsize);
