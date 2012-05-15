@@ -2773,7 +2773,7 @@ static int init_validation_md(file_ctx *fctx, uint64 start, uint64 end)
         if (file_shared->md)         /* already initialized */
                 return atomic_fetch_and_inc32(&file_shared->hdr->ref) == 0;
 
-        blocks = (end - start + conf.stampblock - 1) / conf.stampblock;
+        blocks = (end - start + conf.stampblock) / conf.stampblock;
         size = blocks * sizeof (block_md);
         size = (size + pagesize -1) / pagesize * pagesize;
         hdrsize = ((sizeof(*file_shared->hdr) + pagesize -1 )/ pagesize) * pagesize;
