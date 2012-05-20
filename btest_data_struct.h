@@ -93,11 +93,11 @@ struct workload {
 	int trimsize;		/**< Trim block size in bytes */
 };
 
-#define BLOCK_STAMP_REFED(id, version)  ((1lu << 63) | ((uint64)(id) << 32) | ((version) & 0xfffffffflu))
+#define BLOCK_STAMP_REFED(id, version)  ((1llu << 63) | ((uint64)(id) << 32) | ((version) & 0xfffffffflu))
 #define BLOCK_STAMP_IS_REFED(stamp)     ((uint)((stamp) >> 63))
 #define BLOCK_STAMP_ID(stamp)           (((stamp) >> 32) & 0x7fffffff)
-#define BLOCK_STAMP_VERSION(stamp)      ((stamp) & 0xfffffffflu)
-#define BLOCK_STAMP(stamp)              ((stamp) & ~(1lu << 63))
+#define BLOCK_STAMP_VERSION(stamp)      ((stamp) & 0xffffffffllu)
+#define BLOCK_STAMP(stamp)              ((stamp) & ~(1llu << 63))
 
 typedef struct block_md {
         uint64 stamp;           /** if ref > 0 -> new stamp, ref == 0 -> current stamp */

@@ -19,6 +19,10 @@ _LIBS=${patsubst %,-l %, ${LIBS}}
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -g -O3 -D _LARGEFILE64_SOURCE -DCOMMIT="${commit}" -Wall -o $@ $(LDFLAGS) $^ ${_LIBS}
 
+btest32:
+	# requires glibc-devel.i686 libaio-devel.i686 libaio.i686 libgcc.i686
+	CFLAGS=-m32 make
+
 $(OBJS): $(HDRS) | checkrpms
 
 checkrpms:

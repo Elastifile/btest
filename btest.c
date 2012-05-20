@@ -511,7 +511,7 @@ void dump_debug_line(char *basename)
                 if (!line->type)
                         continue;
                 n++;
-                fprintf(f, "[%lx:%x] %c block %ld mdid %d old %016lx stamp %016lx version %lx ref %ld (%c)\n",
+                fprintf(f, "[%"PRIx64":%x] %c block %"PRIu64" mdid %d old %016"PRIx64" stamp %016"PRIx64" version %"PRIx64" ref %"PRIx64" (%c)\n",
                         line->timestamp, line->tid, line->type, line->blockid, (int)line->mdid, line->old, line->stamp,
                         BLOCK_MD_VERSION(line->verref), BLOCK_MD_REF(line->verref), line->iswrite ? 'W' : 'R');
         }
@@ -678,11 +678,11 @@ uint64 parse_storage_size(char *arg)
 	switch (arg[l - 1]) {
         case 'P':
         case 'p':
-                factor = 1lu << 50;
+                factor = 1llu << 50;
                 break;
         case 'T':
         case 't':
-                factor = 1lu << 40;
+                factor = 1llu << 40;
                 break;
 	case 'G':
 	case 'g':
@@ -1166,7 +1166,7 @@ void reset_block_md(file_ctx *ctx, uint64 offset, size_t end)
         if (end > ctx->size)
                 end = ctx->size;
 
-        printf("reset md of %s from %lu to %lu\n", ctx->file, offset, end);
+        printf("reset md of %s from %"PRIu64" to %zu\n", ctx->file, offset, end);
 
         for (e = end / conf.stampblock; blockid < e; blockid++)
                 ctx->shared.md[blockid].stamp = 0;
@@ -1460,7 +1460,7 @@ void summary(char *title, IOStats * stats, int n)
         	snprintf(verr, sizeof verr, ", verification errors %" PRIu64, stats->verify_errors);
 
         printf("%s: %.3f seconds, %.3f iops, avg latency %"
-	       PRIu64 " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s, total ops %lu\n",
+	       PRIu64 " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s, total ops %"PRIu64"\n",
                title,
                ((double)stats->duration) / ((double)1000000.0) / n,
                comp_iops(stats) * n,
@@ -1476,9 +1476,9 @@ void summary(char *title, IOStats * stats, int n)
                 printf(" %s: %u", hickup_level_strings[i], stats->hickup_histogram[i]);
         printf("\n");
         if (conf.num_op_limit)
-                printf("%s: Performed %lu ops out of %lu requested ops\n", title, total_ops, conf.num_op_limit);
+                printf("%s: Performed %"PRIu64" ops out of %"PRIu64" requested ops\n", title, total_ops, conf.num_op_limit);
         if (conf.verification_mode)
-                printf("%s: Performed %lu verification IOs, %"PRIu64" errors found\n", title, total_ops, stats->verify_errors);
+                printf("%s: Performed %"PRIu64" verification IOs, %"PRIu64" errors found\n", title, total_ops, stats->verify_errors);
 
         fflush(stdout);
 }
@@ -1552,7 +1552,7 @@ void worker_subtotal(IOStats * stats, char *title, int n)
         else
                 printf("%s: %d workers, %.3f seconds (%.3f), %.3f"
                         " iops, avg latency %" PRIu64 " usec, bandwidth %" PRIu64
-                        " KB/s, errors %" PRIu64 "%s, ops %lu\n",
+                        " KB/s, errors %" PRIu64 "%s, ops %"PRIu64"\n",
                         title, n,
                         ((double)stats->duration) / ((double)1000000.0) / n,
                         ((double)stats->sduration) / ((double)1000000.0),
@@ -1625,7 +1625,7 @@ uint64 worker_summary_diff(worker_ctx * worker, IOStats * subtotal)
 
 		printf("Worker %d: %s %" PRIu64 " %" PRIu64
 		       ": last %.3f seconds (%.3f), %.3f" " iops, avg latency %"
-		       PRIu64 " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s, ops %lu\n",
+		       PRIu64 " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s, ops %"PRIu64"\n",
 	               worker->num, worker->fctx->file, startoffset, endoffset,
 		       stats->duration * 1.0 / (double) 1000000.0,
 		       worker->stats.duration * 1.0 / (double) 1000000.0,
@@ -1668,7 +1668,7 @@ void worker_summary(worker_ctx * worker, IOStats * subtotal)
 
 	printf("Worker %d: %s %" PRIu64 " %" PRIu64
 	       ": %.3f seconds, %.3f" " iops, avg latency %" PRIu64
-	       " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s, ops %lu\n",
+	       " usec, bandwidth %" PRIu64 " KB/s, errors %" PRIu64 "%s, ops %"PRIu64"\n",
 	       worker->num, worker->fctx->file, startoffset, endoffset,
 	       stats->duration * 1.0 / (double) 1000000.0,
 	       comp_iops(stats), stats->lat, comp_bw(stats), stats->errors, verr, stats->ops);
@@ -4330,7 +4330,7 @@ int main(int argc, char **argv)
                         conf.num_op_limit = strtol(optarg, 0, 0);
                         if (conf.secs < 0)      /* if time limit is not specified - use infinity */
                                 conf.secs = 2000000;
-                        printf("Test is limited to %lu IO operations\n", conf.num_op_limit);
+                        printf("Test is limited to %"PRIu64" IO operations\n", conf.num_op_limit);
 			break;
                 case 'e':
                         check_mode("exit on eof (-e)", -1, 0);
