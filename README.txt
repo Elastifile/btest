@@ -1,3 +1,8 @@
+120520 - Version 156:
+	- 32 bit complication fixes
+	- several valiataion mode fixes
+	- imcomplete IO handling
+
 120315 - Version 155:
 	- fix dedup calc for progressive fills
 
