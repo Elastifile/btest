@@ -12,7 +12,25 @@ else
 SRCS += btest_ext_default.c
 endif
 
+# check for git
+GIT:=`which git`
+ifneq ($(GIT),)
 commit=${shell echo `git rev-parse --short HEAD`:`git name-rev HEAD` | tr ' ' -}
+endif
+
+# check for package manager
+PKG=`which rpm`
+
+ifneq ($(PKG),)
+# assume debian
+LIBAIODEV=libaio-dev
+PKGCHK="dpkg-query -s"
+else
+#assume redhat
+LIBAIODEV=libaio-devel
+PKGCHK="rpm -q"
+endif
+
 OBJS=$(SRCS:%.c=%.o)
 _LIBS=${patsubst %,-l %, ${LIBS}}
 
@@ -23,10 +41,11 @@ btest32:
 	# requires glibc-devel.i686 libaio-devel.i686 libaio.i686 libgcc.i686
 	CFLAGS=-m32 make
 
-$(OBJS): $(HDRS) | checkrpms
+$(OBJS): $(HDRS) | checkpkgs
 
-checkrpms:
-	@if ! rpm -q libaio-devel > /dev/null 2>&1; then echo "libaio-devel is missing"; exit 1; fi
+checkpkgs:
+	@if [ -z $(GIT) ]; then echo git is required; exit 1; fi
+	@if ! eval "$(PKGCHK) $(LIBAIODEV)" > /dev/null 2>&1; then echo "$(LIBAIODEV) is missing"; exit 1; fi
 
 doc:
 	doxygen
