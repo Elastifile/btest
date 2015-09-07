@@ -13,15 +13,19 @@ SRCS += btest_ext_default.c
 endif
 
 # check for git
-GIT:=`which git`
+GIT:=$(shell which git)
 ifneq ($(GIT),)
 commit=${shell echo `git rev-parse --short HEAD`:`git name-rev HEAD` | tr ' ' -}
 endif
 
 # check for package manager
-PKG=`which rpm`
+PKG:=$(shell which rpm)
 
-ifneq ($(PKG),)
+ifeq ($(PKG),)
+PKG:=$(shell which dpkg-query)
+ifeq ($(PKG),)
+PKG=:$(error "no pkg manager found (rpm or dpkg-query)")
+endif
 # assume debian
 LIBAIODEV=libaio-dev
 PKGCHK="dpkg-query -s"
@@ -45,7 +49,7 @@ $(OBJS): $(HDRS) | checkpkgs
 
 checkpkgs:
 	@if [ -z $(GIT) ]; then echo git is required; exit 1; fi
-	@if ! eval "$(PKGCHK) $(LIBAIODEV)" > /dev/null 2>&1; then echo "$(LIBAIODEV) is missing"; exit 1; fi
+	@if ! eval "$(PKGCHK) $(LIBAIODEV)" > /dev/null 2>&1; then echo "$(LIBAIODEV) is missing (PKG=$(PKG))"; exit 1; fi
 
 doc:
 	doxygen
