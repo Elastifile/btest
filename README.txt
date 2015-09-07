@@ -1,11 +1,18 @@
-150907 - Version 157:
+
+150907 - Version 161:
 	- Ubuntu/Debian compilation
 	- Compresion fixes
+	- change latency levels 2-10,10-50 -> 2-5,5-20
+
+121216 - Version 160:
+	- fix partial/incomplete io handling
+	- fix out of range bug
+	- add latency level
 
 120520 - Version 156:
 	- 32 bit complication fixes
 	- several valiataion mode fixes
-	- imcomplete IO handling
+	- incomplete IO handling
 
 120315 - Version 155:
 	- fix dedup calc for progressive fills

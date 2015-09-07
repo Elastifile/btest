@@ -136,7 +136,7 @@
 #include "btest_data_struct.h"
 #include "sg_read.h"
 
-#define BTEST_VERSION 157
+#define BTEST_VERSION 161
 #define xstr(s) str(s)
 #define str(s) #s
 #define BTEST_COMMIT xstr(COMMIT)
@@ -217,6 +217,11 @@ uint64 fixstamp;            /**< used for "-p -1 " */
 void(*th_busywait)();
 
 /**
+ * Global variables for managing (potential) partial io's.
+ */
+#define PARTIAL_IOS_RETRIES 5
+
+/**
  * Global variables for Sync + Async
  */ 
 #define FORMAT_IOSZ (1 << 20)
@@ -234,8 +239,9 @@ static char* hickup_level_strings[HICCUP_LEVEL_NUM_OF] =
 {
         [HICKUP_LEVEL_0_MILLI] "<1ms",
         [HICKUP_LEVEL_1_MILLI] "1ms",
-        [HICKUP_LEVEL_2TO10_MILLI] "2-10ms",
-        [HICKUP_LEVEL_11TO100_MILLI] "11-100ms",
+        [HICKUP_LEVEL_2TO5_MILLI] "2-5ms",
+        [HICKUP_LEVEL_6TO20_MILLI] "6-20ms",
+        [HICKUP_LEVEL_21TO100_MILLI] "21-100ms",
         [HICKUP_LEVEL_101ANDUP_MILLI] ">100ms"
 };
 
@@ -1263,9 +1269,12 @@ void checkbuffer(worker_ctx *worker, char *buf, int len, long long offset)
         for (s = buf + used, offset += used; left > 0; s += conf.stampblock, left -= conf.stampblock, offset += conf.stampblock) {
                 c = 0;
                 /* build write id/dedup stamp */
-                if (wlctx->dedup_stamp_modulo >= 0)
+                if (wlctx->dedup_stamp_modulo >= 0) {
+                        DEBUG3("checking stamp in checkbuffer for: file %s, position %d", worker->fctx->file, 
+                                offset / conf.stampblock);
                         if ((c = check_stamp(worker, s, left, offset)) < 0)
                                 continue;
+                }
 
                 if (wlctx->wl->use_offset_stamps) {
                         b = snprintf(tmp, sizeof tmp, "%016llx", offset);
@@ -1353,7 +1362,7 @@ void unrefbuffer(worker_ctx *worker, char *buf, int len, long long offset)
                         return;
         }
 
-        DEBUG3("file %s offset 0x%lx used %d conf.stampblock %d", worker->fctx->file, offset, used, conf.stampblock);
+        DEBUG3("file %s offset 0x%lx used %d conf.stampblock %d, worker:%p", worker->fctx->file, offset, used, conf.stampblock, worker);
 
         /* process each conf.stampblock and validate write/dedup stamps + offset stamps */
         for (s = buf + used, offset += used; left > 0; s += conf.stampblock, left -= conf.stampblock, offset += conf.stampblock) {
@@ -2035,6 +2044,25 @@ workload_ctx *next_workload_ctx(worker_ctx* worker)
         return worker->fctx->wlctxs + workloadno;
 }
 
+/**
+ * checks if the IO parameters are valid
+ * @param fctx - file for IO
+ * @param length - length of IO
+ * @param offset - start offset of write.
+ * @return 1 if true, UNKNOWN_FILE_SIZE (=2) if unknown file_ctx 0 otherwise.
+ */
+IoValidationRes valid_io(file_ctx *fctx, size_t length, off_t offset)
+{
+        if (fctx == NULL) {
+                DEBUG3("Unknown file size. Can't determine if io is valid.");
+                return IO_BOUNDS_UNKNOW;
+        }
+                
+	if (offset >= 0 && fctx->size >= offset + length)
+                return IO_IN_BOUNDS;   
+        return IO_OUT_OF_BOUNDS;
+}
+
 /**********************************************************************************************************************
  * Shared Sync - Sync/Async
  **********************************************************************************************************************/
@@ -2105,6 +2133,9 @@ ssize_t aio_read(worker_ctx* worker, int fd, void *buf, size_t count, off_t offs
         struct iocb* aio_iocb = worker->aio_cb;
         int res;
 
+        if (worker != NULL && valid_io(worker->fctx, count, offset) == IO_OUT_OF_BOUNDS)
+                PANIC("Invalid read range: file size 0x%lx, read start 0x%lx, read end 0x%lx", worker->fctx->size, offset, offset+count);
+
         io_prep_pread(aio_iocb, fd, buf, count, offset);
 
         /* data field must be set after the io_prep call because the last clears the structure */
@@ -2124,7 +2155,10 @@ ssize_t aio_write(worker_ctx* worker, int fd, void *buf, size_t count, off_t off
 {
         struct iocb* aio_iocb = worker->aio_cb;
         int res;
-
+        
+        if (worker != NULL && valid_io(worker->fctx, count, offset) == IO_OUT_OF_BOUNDS)
+                PANIC("Invalid write range: file size 0x%lx, write start 0x%lx, write end 0x%lx", worker->fctx->size, offset, offset+count);
+        
         io_prep_pwrite(aio_iocb, fd, buf, count, offset);
 
         /* data field must be set after the io_prep call because the last clears the structure */
@@ -2151,7 +2185,10 @@ void *sync_prepare_buf(worker_ctx *worker, int is_read)
 ssize_t sync_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset)
 {
         ssize_t r;
-
+        
+        if (worker != NULL && valid_io(worker->fctx, count, offset) == IO_OUT_OF_BOUNDS)
+                PANIC("Invalid read range: file size 0x%lx, read start 0x%lx, read end 0x%lx", worker->fctx->size, offset, offset+count);
+        
         do {
                 r = pread(fd, buf, count, offset);
 
@@ -2170,6 +2207,9 @@ ssize_t sync_write(worker_ctx *worker, int fd, void *buf, size_t count, off_t of
 {
         ssize_t r;
 
+        if (worker != NULL && valid_io(worker->fctx, count, offset) == IO_OUT_OF_BOUNDS)
+                PANIC("Invalid write range: file size 0x%lx, write start 0x%lx, write end 0x%lx", worker->fctx->size, offset, offset+count);
+        
         do {
                 r = pwrite(fd, buf, count, offset);
 
@@ -2189,6 +2229,9 @@ ssize_t sync_write(worker_ctx *worker, int fd, void *buf, size_t count, off_t of
  **********************************************************************************************************************/
 ssize_t sg_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset)
 {
+        if (worker != NULL && valid_io(worker->fctx, count, offset) == IO_OUT_OF_BOUNDS)
+                PANIC("Invalid read range: file size 0x%lx, read start 0x%lx, read end 0x%lx", worker->fctx->size, offset, offset+count);
+
         int r = sg_rw(fd, 0, buf, count/512, offset/512, 512, 10, 0, 0, NULL, 0, 0);
 
         if (conf.verify && worker && r == count)
@@ -2201,6 +2244,9 @@ ssize_t sg_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t offse
 
 ssize_t sg_write(worker_ctx* worker, int fd, void *buf, size_t count, off_t offset)
 {
+        if (worker != NULL && valid_io(worker->fctx, count, offset) == IO_OUT_OF_BOUNDS)
+                PANIC("Invalid write range: file size 0x%lx, write start 0x%lx, write end 0x%lx", worker->fctx->size, offset, offset+count);
+
         int r = sg_rw(fd, 1, buf, count/512, offset/512, 512, 10, 0, 0, NULL, 0, 0);
 
         if (conf.verify && worker && r == count)
@@ -2499,11 +2545,13 @@ uint64 next_seq_offset(worker_ctx *worker)
 uint64 next_rand_offset(worker_ctx *worker)
 {
         workload *wl = worker->wlctx->wl;
+        uint64 block;
         
         DEBUG3("worker %p wl %p wl->len %ul blocksize %d", worker, wl, worker->wlctx->len, wl->blocksize);
-        uint64 block = saferandom64(&worker->rbuf) % (worker->wlctx->len / wl->blocksize);
-
-	return wl->startoffset + block * wl->blocksize;
+        /* The random offset should be between wl->startoffset and [eof - blocksize]. */
+        block = saferandom64(&worker->rbuf) % ((worker->wlctx->len / wl->alignsize)-wl->blocksize); 
+        
+	return wl->startoffset + block * wl->alignsize;
 }
 
 /**********************************************************************************************************************
@@ -3099,10 +3147,12 @@ int io_ended(worker_ctx *worker, int ioret, int update_stats)
                 stats->hickup_histogram[HICKUP_LEVEL_0_MILLI]++;
         else if (duration_milli == 1)
                 stats->hickup_histogram[HICKUP_LEVEL_1_MILLI]++;
-        else if ((duration_milli >= 2) && (duration_milli <= 10))
-                stats->hickup_histogram[HICKUP_LEVEL_2TO10_MILLI]++;
-        else if ((duration_milli >= 11) && (duration_milli <= 100))
-                stats->hickup_histogram[HICKUP_LEVEL_11TO100_MILLI]++;
+        else if ((duration_milli >= 2) && (duration_milli <= 5))
+                stats->hickup_histogram[HICKUP_LEVEL_2TO5_MILLI]++;
+        else if ((duration_milli >= 6) && (duration_milli <= 20))
+                stats->hickup_histogram[HICKUP_LEVEL_6TO20_MILLI]++;
+        else if ((duration_milli >= 21) && (duration_milli <= 100))
+                stats->hickup_histogram[HICKUP_LEVEL_21TO100_MILLI]++;
         else if (duration_milli > 100)
                 stats->hickup_histogram[HICKUP_LEVEL_101ANDUP_MILLI]++;
 
@@ -3275,6 +3325,8 @@ void *aio_thread(aio_thread_ctx *athread)
         struct iocb *completed_iocb;
         worker_ctx *myworkers[total_nfiles][conf.aio_window_size];
         worker_ctx *worker;
+        worker_ctx *failing_worker = NULL;
+        int partial_io_counter = 0;
         int aiores, initializer = 0;
         int inflight_ios_count = 0;
         int r, f, i;
@@ -3339,6 +3391,9 @@ void *aio_thread(aio_thread_ctx *athread)
                         PANIC("AsyncIO io_getevents failed with error: %d (%s)", aiores, strerror(-aiores));
 
                 inflight_ios_count -= aiores;
+                if (inflight_ios_count < 0)
+                        PANIC("inflight_ios_count=%d (less than 0)", inflight_ios_count);
+                
                 DEBUG3("got %d events, inflight %d", aiores, inflight_ios_count);
                 /* process all events */
                 for (i = 0, event = events; i < aiores; i++, event++) {
@@ -3347,6 +3402,14 @@ void *aio_thread(aio_thread_ctx *athread)
                         file_ctx *fctx = worker->fctx;
                         workload *wl = worker->wlctx->wl;
 
+                        ADD_DEBUG_LINE('V', worker->tid, worker->fctx->shared.hdr->workers_mds+BLOCK_STAMP_ID(worker->fctx->shared.md->stamp)); 
+
+                        if (worker == failing_worker) {
+                                WARN("failing worker is back %p", worker);
+                                partial_io_counter++;
+                                if (partial_io_counter > PARTIAL_IOS_RETRIES)
+                                        PANIC("Retried and failed IO %d times", PARTIAL_IOS_RETRIES);
+                        }
                         if ((completed_iocb == NULL) || (worker == NULL)) {
                                 PANIC("AyncIO completion no data - event %d out of %d.", i, aiores);
                                 continue;
@@ -3356,16 +3419,26 @@ void *aio_thread(aio_thread_ctx *athread)
 
                         /* verify the IO result code and size */
                         if (!io_event_is_valid(event) || event->res != completed_iocb->u.c.nbytes) {
+                                ADD_DEBUG_LINE('E', worker->tid, worker->fctx->shared.hdr->workers_mds+BLOCK_STAMP_ID(worker->fctx->shared.md->stamp));
+                                failing_worker = worker;
+                                
                                 r = -1;
 
                                 WARN("%d: IO error on '%s (event %d out of %d). return code %lu. number of bytes "
                                         "processed is %lu out of %lu.",
-                                        worker->tid, fctx->file, i, aiores,
+                                        worker->tid, fctx->file, completed_iocb->u.c.offset, i, aiores,
                                         event->res2, event->res, completed_iocb->u.c.nbytes);
                         } else if (conf.verify) {               /* intentionally leave IO as open in case of errors */
-                                if (completed_iocb->aio_lio_opcode == 1/*LIO_WRITE*/)
+                                if (failing_worker == worker){
+                                        failing_worker = NULL;
+                                        partial_io_counter = 0;
+                                }
+                                
+                                if (completed_iocb->aio_lio_opcode == 1/*LIO_WRITE*/) {
                                         shared.write_completed(worker, completed_iocb->u.c.buf,
                                                                 completed_iocb->u.c.offset, completed_iocb->u.c.nbytes);
+                                        
+                                }
                                 else if (completed_iocb->aio_lio_opcode == 0/*LIO_READ*/)
                                         shared.read_completed(worker, completed_iocb->u.c.buf,
                                                                 completed_iocb->u.c.offset, completed_iocb->u.c.nbytes);
@@ -3375,17 +3448,24 @@ void *aio_thread(aio_thread_ctx *athread)
                         
                         if (io_event_is_valid(event)) {
                                 if (fctx->fd != completed_iocb->aio_fildes) {
-                                        WARN("AsyncIO completion mismatch (event %d out of %d): fd is %d, expected %d. ",
-                                                i, aiores, completed_iocb->aio_fildes, fctx->fd);
+                                        WARN("AsyncIO completion mismatch '%s' offset %"PRIu64" (event %d out of %d): fd is %d, expected %d. ",
+                                                fctx->file, completed_iocb->u.c.offset, i, aiores, completed_iocb->aio_fildes, fctx->fd);
                                 } else if (event->res != completed_iocb->u.c.nbytes) {
-                                        WARN("AsyncIO completion mismatch (event %d out of %d): res is %lu expected %lu",
-                                                i, aiores, event->res, completed_iocb->u.c.nbytes);
-
+                                        WARN("AsyncIO completion mismatch '%s' offset %"PRIu64" (event %d out of %d): res is %lu expected %lu",
+                                                fctx->file, completed_iocb->u.c.offset, i, aiores, event->res, completed_iocb->u.c.nbytes);
+                                        
                                         /* retry IO  in case of incomplete io */
                                         inflight_ios_count++;
-                                        if (shared.write(worker, fctx->fd, shared.prepare_buf(worker, 0),
-                                                        wl->blocksize, worker->offset) == wl->blocksize)
-                                                continue;
+					if (completed_iocb->aio_lio_opcode == 1/*LIO_WRITE*/) {
+	                                        if (shared.write(worker, fctx->fd, completed_iocb->u.c.buf,
+        	                                                completed_iocb->u.c.nbytes, completed_iocb->u.c.offset) == completed_iocb->u.c.nbytes)
+                                        		continue;
+					} else if (completed_iocb->aio_lio_opcode == 0/*LIO_READ*/) {
+	                                        if (shared.read(worker, fctx->fd, completed_iocb->u.c.buf,
+        	                                                completed_iocb->u.c.nbytes, completed_iocb->u.c.offset) == completed_iocb->u.c.nbytes)
+                                        		continue;
+                                	} else
+                                        	WARN("'%s' offset %"PRIu64" unknown aio code: %u", fctx->file, worker->offset, (uint)completed_iocb->aio_lio_opcode);
 
                                         WARN("retry incomplete IO to %s offset %"PRIu64 " sz %u failed!",
                                         fctx->file, worker->offset, wl->blocksize);

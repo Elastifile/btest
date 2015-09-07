@@ -55,11 +55,18 @@ typedef struct workload_ctx workload_ctx;
 typedef enum HiccupLevel {
         HICKUP_LEVEL_0_MILLI,   /* up to next level */
         HICKUP_LEVEL_1_MILLI,
-        HICKUP_LEVEL_2TO10_MILLI,
-        HICKUP_LEVEL_11TO100_MILLI,
+        HICKUP_LEVEL_2TO5_MILLI,
+        HICKUP_LEVEL_6TO20_MILLI,
+        HICKUP_LEVEL_21TO100_MILLI,
         HICKUP_LEVEL_101ANDUP_MILLI,
         HICCUP_LEVEL_NUM_OF
 } HiccupLevel;
+
+typedef enum IoValidationRes {
+        IO_IN_BOUNDS,
+        IO_OUT_OF_BOUNDS,
+        IO_BOUNDS_UNKNOW           
+} IoValidationRes;
 
 typedef struct IOStats {
 	char *title;
