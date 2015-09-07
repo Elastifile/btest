@@ -1,3 +1,7 @@
+150907 - Version 157:
+	- Ubuntu/Debian compilation
+	- Compresion fixes
+
 120520 - Version 156:
 	- 32 bit complication fixes
 	- several valiataion mode fixes
