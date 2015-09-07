@@ -2744,7 +2744,8 @@ static void validate_md_file_size(shared_file_ctx *shared, off_t size)
 
         if (f_stat.st_size < size) {
                 DEBUG("resize %s to %ld bytes", shared->md_file, size);
-                ftruncate(shared->fd, size);
+                if (ftruncate(shared->fd, size) != 0)
+			WARN("ftruncate failed on shared file %s", shared->md_file);
         }
 }
 
