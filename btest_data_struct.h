@@ -160,6 +160,7 @@ struct worker_ctx {
         
 	/* Internal - Common */
 	void *buf;
+	void *read_buf;
         uint64 offset;		    /**< Offset of next IO in bytes */
         
         struct drand48_data rbuf;

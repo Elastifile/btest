@@ -274,7 +274,7 @@ struct shared {
         void(*cond_wait_func)();
         void(*cond_broadcast_func)(int n);
 
-        void *(*prepare_buf)(worker_ctx *worker);
+        void *(*prepare_buf)(worker_ctx *worker, int is_read);
         ssize_t (*read)(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset);
         ssize_t (*write)(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset);
         void(*write_completed)(worker_ctx *worker, void *buf, uint64 offset, int size);
@@ -2095,9 +2095,9 @@ void sync_th_busywait()
 /**********************************************************************************************************************
  * IO Functions - AsyncIO
  **********************************************************************************************************************/
-void *aio_prepare_buf(worker_ctx* worker)
+void *aio_prepare_buf(worker_ctx* worker, int is_read)
 {
-        return worker->buf;
+        return is_read ? worker->read_buf : worker->buf;
 }
 
 ssize_t aio_read(worker_ctx* worker, int fd, void *buf, size_t count, off_t offset)
@@ -2143,9 +2143,9 @@ ssize_t aio_write(worker_ctx* worker, int fd, void *buf, size_t count, off_t off
 /**********************************************************************************************************************
  * IO Functions - SyncIO
  **********************************************************************************************************************/
-void *sync_prepare_buf(worker_ctx *worker)
+void *sync_prepare_buf(worker_ctx *worker, int is_read)
 {
-        return worker->buf;
+        return is_read ? worker->read_buf : worker->buf;
 }
 
 ssize_t sync_read(worker_ctx *worker, int fd, void *buf, size_t count, off_t offset)
@@ -2518,7 +2518,7 @@ int do_seq_read(worker_ctx *worker)
         void *buf;
 
 	worker->offset = seq_offset(worker);
-        buf = shared.prepare_buf(worker);
+        buf = shared.prepare_buf(worker, 1);
         
 	DEBUG3("file %s fd %d seek to offset %" PRIu64, fctx->file, fctx->fd, worker->offset);
         refbuffer(worker, buf, wl->blocksize, worker->offset);
@@ -2539,7 +2539,7 @@ int do_seq_write(worker_ctx * worker)
         void *buf;
 
 	worker->offset = seq_offset(worker);
-        buf = shared.prepare_buf(worker);
+        buf = shared.prepare_buf(worker, 0);
 
         stampbuffer(worker, buf, wl->blocksize, worker->offset);
         
@@ -2561,7 +2561,7 @@ int do_rand_read(worker_ctx * worker)
         void *buf;
 
 	worker->offset = next_rand_offset(worker);
-        buf = shared.prepare_buf(worker);
+        buf = shared.prepare_buf(worker, 1);
 
 	DEBUG3("file %s fd %d seek to offset %" PRIu64, fctx->file, fctx->fd, worker->offset);
         refbuffer(worker, buf, wl->blocksize, worker->offset);
@@ -2582,7 +2582,7 @@ int do_rand_write(worker_ctx * worker)
         void *buf;
 
 	worker->offset = next_rand_offset(worker);
-        buf = shared.prepare_buf(worker);
+        buf = shared.prepare_buf(worker, 0);
 
         stampbuffer(worker, buf, wl->blocksize, worker->offset);
 
@@ -3168,6 +3168,7 @@ static void init_data_buf(void *buf, size_t size)
         static void *savebuf;
         static int initialized;
         uint32 *u, *e;
+	uint64 *lu, *le;
         int r;
   
         shared.lock_func();
@@ -3193,13 +3194,15 @@ static void init_data_buf(void *buf, size_t size)
         }
         
         DEBUG2("fill data buf (%ld byte) with random data compression rate %d", maxblocksize, conf.compression);
-        /* compression rate is given, fill buf with random stamps with repetitions */
-        for (u = savebuf, e = u + (maxblocksize/sizeof *u); u < e; ) {
-                uint32 v = saferandom(&rbuf);
-                for (r = 0; r < conf.compression && u < e; r++, u++)
-                        *u = v;
+        /* Compression rate is given, fill buf with random stamps with repetitions.
+	 * Note that the real compression will be lower as RLE (which should be the best here)
+ 	 * still needs some bits for the length...
+	 */
+        for (lu = savebuf, le = lu + (maxblocksize/sizeof *lu); lu < le; ) {
+                uint64 v = saferandom64(&rbuf);
+                for (r = 0; r < conf.compression && lu < le; r++, lu++)
+                        *lu = v;
         }
-        
 saved:
         DEBUG2("used saved buf to fill buf (%ld bytes)", size);
         memcpy(buf, savebuf, size);
@@ -3224,6 +3227,9 @@ worker_ctx *new_worker(file_ctx *fctx)
         
         if (!(worker->buf = valloc(maxblocksize)))
                 PANIC("can't alloc buf sized %d bytes", maxblocksize);
+        
+        if (!(worker->read_buf = valloc(maxblocksize)))
+                PANIC("can't alloc read_buf sized %d bytes", maxblocksize);
         
         init_data_buf(worker->buf, maxblocksize);
 
@@ -3377,7 +3383,7 @@ void *aio_thread(aio_thread_ctx *athread)
 
                                         /* retry IO  in case of incomplete io */
                                         inflight_ios_count++;
-                                        if (shared.write(worker, fctx->fd, shared.prepare_buf(worker),
+                                        if (shared.write(worker, fctx->fd, shared.prepare_buf(worker, 0),
                                                         wl->blocksize, worker->offset) == wl->blocksize)
                                                 continue;
 
